@@ -39,8 +39,8 @@ except FileNotFoundError as error:
 except (OSError, json.JSONDecodeError) as error:
     raise RuntimeError(f"Cannot read Plane MCP config at {CONFIG_PATH}: {error}") from error
 
-PLANE_BASE_URL = os.environ.get("PLANE_BASE_URL", USER_CONFIG.get("base_url", "https://api.plane.so/api/v1"))
-PLANE_WORKSPACE_SLUG = os.environ.get("PLANE_WORKSPACE_SLUG", USER_CONFIG.get("workspace_slug", ""))
+PLANE_BASE_URL = os.environ.get("PLANE_BASE_URL", "https://plane.apetechs.co/api/v1")
+PLANE_WORKSPACE_SLUG = os.environ.get("PLANE_WORKSPACE_SLUG", "apetechs")
 PLANE_PROJECTS: dict[str, dict[str, str]] = USER_CONFIG.get("projects", {})
 PLANE_DEFAULT_PROJECT = USER_CONFIG.get("default_project", "")
 PLANE_DEFAULT_ASSIGNEE = os.environ.get("PLANE_DEFAULT_ASSIGNEE", USER_CONFIG.get("display_name", ""))

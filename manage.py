@@ -9,13 +9,17 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from urllib.parse import urlparse
 from uuid import UUID
 
 REPO = "https://github.com/ydanh-dev/plane_mcp.git"
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = Path.home() / ".config/plane-mcp/config.json"
+PLANE_BASE_URL = "https://plane.apetechs.co/api/v1"
+PLANE_WORKSPACE_SLUG = "apetechs"
 
 
 def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -40,56 +44,68 @@ def python_executable() -> Path:
     return ROOT / (".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python")
 
 
+def fetch_project_metadata(token: str, project_id: str) -> dict[str, str]:
+    url = (
+        f"{PLANE_BASE_URL}/workspaces/{urllib.parse.quote(PLANE_WORKSPACE_SLUG, safe='')}"
+        f"/projects/{urllib.parse.quote(project_id, safe='')}/"
+    )
+    request = urllib.request.Request(url, headers={"X-API-Key": token, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            project = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise ValueError("Could not read this project; check the UUID, API token, and network access") from error
+    if not isinstance(project, dict):
+        raise ValueError("Plane returned invalid project details for this UUID")
+    identifier = str(project.get("identifier") or "").upper()
+    name = str(project.get("name") or "").strip()
+    if (str(project.get("id")) != project_id
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", identifier) or not name):
+        raise ValueError("Plane returned invalid project details for this UUID")
+    return {"id": project_id, "identifier": identifier, "name": name}
+
+
 def setup() -> None:
     previous = load_config()
     print("Plane MCP setup — user-local config; token is stored in the operating system credential store.\n")
-    base_url = input(f"Plane API base URL [{previous.get('base_url', 'https://api.plane.so/api/v1')}] (Enter = keep default / nhấn Enter để giữ): ").strip()
-    base_url = base_url or str(previous.get("base_url", "https://api.plane.so/api/v1"))
-    if urlparse(base_url).scheme != "https":
-        raise SystemExit("Plane API URL must use HTTPS")
-    workspace = input(f"Workspace slug [{previous.get('workspace_slug', '')}]: ").strip() or str(previous.get("workspace_slug", ""))
-    if not workspace or not re.fullmatch(r"[A-Za-z0-9_-]+", workspace):
-        raise SystemExit("Enter a valid workspace slug")
-    display = input(f"Your Plane display name [{previous.get('display_name', '')}]: ").strip() or str(previous.get("display_name", ""))
-    if not display:
-        raise SystemExit("Display name is required")
+    display = input(f"Your Plane display name (optional) [{previous.get('display_name', '')}]: ").strip() or str(previous.get("display_name", ""))
+
+    token = getpass.getpass("Plane API token (input hidden): ").strip()
+    if not token:
+        raise SystemExit("Token is required")
 
     projects: dict[str, dict[str, str]] = {}
     old_projects = previous.get("projects", {})
     if isinstance(old_projects, dict):
         projects.update(old_projects)
-    print("\nAdd or update projects. Leave the key empty when done.")
+    print("\nAdd projects by UUID. Project names and task-code prefixes are read from Plane.")
     while True:
-        key = input("Project key (e.g. np, busan, ntssv2; press Enter when done / nhấn Enter khi xong): ").strip()
-        if not key:
+        project_id = input("Plane project UUID (press Enter when done / nhấn Enter khi xong): ").strip()
+        if not project_id:
             break
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", key):
-            print("Use letters/numbers/underscore/hyphen; begin with a letter.")
-            continue
-        identifier = input("  Plane identifier (task-code prefix): ").strip().upper()
-        project_id = input("  Plane project UUID: ").strip()
         try:
             project_id = str(UUID(project_id))
         except ValueError:
-            print("  Invalid UUID; this project was not saved.")
+            print("Enter the full project UUID from the Plane URL.")
             continue
-        name = input("  Display label [same as key]: ").strip() or key
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", identifier):
-            print("  Invalid Plane identifier; this project was not saved.")
+        try:
+            project = fetch_project_metadata(token, project_id)
+        except ValueError as error:
+            print(f"  {error}.")
             continue
-        projects[key] = {"id": project_id, "identifier": identifier, "name": name}
+        default_key = project["identifier"].lower()
+        key = input(f"  Project key [{default_key}] (optional alias): ").strip() or default_key
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", key):
+            print("  Use letters and numbers, beginning with a letter.")
+            continue
+        projects[key] = project
+        print(f"  Added {project['identifier']} — {project['name']} as '{key}'.")
     if not projects:
         raise SystemExit("Configure at least one project")
-    default_project = input(f"Default project key [{previous.get('default_project', '')}]: ").strip() or str(previous.get("default_project", ""))
-    if not default_project:
-        default_project = next(iter(projects))
-    if default_project not in projects:
-        raise SystemExit("Default project key must match a configured project")
+    previous_default = str(previous.get("default_project", ""))
+    default_project = previous_default if previous_default in projects else next(iter(projects))
 
     account = str(previous.get("credential_account") or getpass.getuser())
-    token = getpass.getpass("Plane API token (input hidden): ").strip()
-    if not token:
-        raise SystemExit("Token is required")
     try:
         import keyring
         if keyring.get_keyring().priority <= 0:
@@ -98,7 +114,7 @@ def setup() -> None:
     except Exception as error:
         raise SystemExit(f"Cannot store token securely with the OS credential store: {error}") from error
     config: dict[str, object] = {
-        "base_url": base_url.rstrip("/"), "workspace_slug": workspace,
+        "base_url": PLANE_BASE_URL, "workspace_slug": PLANE_WORKSPACE_SLUG,
         "display_name": display, "credential_account": account,
         "default_project": default_project, "projects": projects,
     }

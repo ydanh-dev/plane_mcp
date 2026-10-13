@@ -51,14 +51,7 @@ Linux requires an active Secret Service implementation on the desktop session. I
 
 ### First-time setup
 
-The setup wizard asks for:
-
-1. Plane API base URL (`https://api.plane.so/api/v1` for Plane Cloud; press Enter to keep it. Change only for self-hosted Plane).
-2. Plane workspace slug.
-3. Your Plane display name, used as the default assignee filter.
-4. Project key, project identifier/task-code prefix, project UUID, and label for each project.
-5. Default project key for task-list requests that omit a project.
-6. Plane API token (hidden while typing; saved in the operating system credential store).
+This installer is configured for ApeTech's self-hosted Plane (`https://plane.apetechs.co/api/v1`, workspace `apetechs`), so those values are not prompted. Setup asks for your display name (optional), API token, and each project's UUID. It reads the project name and task-code prefix from Plane; a short project key is optional and defaults to that prefix. Press Enter at the UUID prompt when finished. On a fresh setup, the first project becomes the default, so there is no separate default-project prompt.
 
 The resulting JSON contains configuration only, not the API token. Protect the file because it identifies the projects this installation may access:
 
@@ -67,7 +60,7 @@ The resulting JSON contains configuration only, not the API token. Protect the f
 | User and project settings | `~/.config/plane-mcp/config.json` | File permissions on macOS/Linux; user-profile ACL on Windows |
 | Plane API token | OS credential store, service `plane-mcp` | macOS Keychain, Windows Credential Manager, or Linux Secret Service |
 
-Project keys are personal aliases such as `np`, `busan`, or `ntssv2`. The Plane identifier is the prefix in task codes; the UUID is the project ID from Plane. Only configured project UUIDs can be read. A task code with an unknown prefix is rejected before an API request.
+Project keys are optional personal aliases such as `np`, `busan`, or `ntssv2`. The Plane identifier is the prefix in task codes and is read automatically; enter the full project UUID from its Plane URL. Only configured project UUIDs can be read. A task code with an unknown prefix is rejected before an API request.
 
 ### Connect Codex CLI / Desktop
 
@@ -214,14 +207,7 @@ Linux cần Secret Service đang hoạt động trong phiên desktop. Nếu khô
 
 ### Cấu hình lần đầu
 
-Wizard sẽ hỏi:
-
-1. Plane API base URL (`https://api.plane.so/api/v1` nếu dùng Plane Cloud; nhấn Enter để giữ mặc định. Chỉ đổi nếu tự host Plane).
-2. Workspace slug trên Plane.
-3. Display name trên Plane, dùng làm assignee mặc định khi lọc task.
-4. Project key, identifier/prefix task, UUID project và tên hiển thị cho mỗi project.
-5. Project mặc định khi yêu cầu liệt kê task không chỉ định project.
-6. Plane API token (không hiển thị khi nhập; được lưu trong kho credential của hệ điều hành).
+Installer này đã cấu hình sẵn Plane self-host của ApeTech (`https://plane.apetechs.co/api/v1`, workspace `apetechs`), nên không hỏi hai mục đó. Setup hỏi display name (có thể để trống), API token và UUID của từng project. Tên project cùng identifier/prefix task được đọc tự động từ Plane; project key ngắn là tùy chọn và mặc định lấy theo prefix. Nhấn Enter tại câu hỏi UUID khi đã nhập xong. Khi cài mới, project đầu tiên tự động làm project mặc định.
 
 File JSON chỉ chứa cấu hình, không chứa API token. Hãy bảo vệ file này vì nó xác định các project MCP được phép truy cập:
 
@@ -230,7 +216,7 @@ File JSON chỉ chứa cấu hình, không chứa API token. Hãy bảo vệ fil
 | Cấu hình user và project | `~/.config/plane-mcp/config.json` | Quyền file trên macOS/Linux; ACL user profile trên Windows |
 | Plane API token | Kho credential của OS, service `plane-mcp` | Keychain trên macOS, Credential Manager trên Windows, Secret Service trên Linux |
 
-Project key là bí danh cá nhân, ví dụ `np`, `busan`, `ntssv2`. Plane identifier là prefix trong mã task; UUID là project ID lấy từ Plane. MCP chỉ đọc các UUID đã khai báo. Mã task có prefix chưa cấu hình sẽ bị từ chối trước khi gọi API.
+Project key là bí danh cá nhân tùy chọn, ví dụ `np`, `busan`, `ntssv2`. Plane tự cung cấp identifier/prefix; nhập đầy đủ project UUID trong URL Plane. MCP chỉ đọc các UUID đã khai báo. Mã task có prefix chưa cấu hình sẽ bị từ chối trước khi gọi API.
 
 ### Kết nối Codex CLI / Desktop
 
@@ -300,8 +286,8 @@ plane-mcp setup
 
 - `plane-mcp: command not found`: thêm `~/.local/bin` vào `PATH`, sau đó mở terminal mới.
 - Lỗi token: chạy lại `plane-mcp setup` và nhập Plane API token hợp lệ.
-- Không tìm thấy project: kiểm tra workspace slug, project UUID và quyền token trên Plane.
-- Prefix task bị từ chối: thêm Plane identifier tương ứng vào `projects`.
+- Không tìm thấy project: kiểm tra project UUID và quyền token trên Plane.
+- Prefix task bị từ chối: chạy lại setup và thêm project tương ứng bằng UUID.
 - Codex hoặc Antigravity không hiện server: kiểm tra đường dẫn executable, rồi reload/khởi động lại MCP server.
 - Update báo file local đã thay đổi: không ghi đè thủ công thư mục cài do updater quản lý. Sao lưu phần cần giữ, cài lại, và giữ config user trong `~/.config`.
 
