@@ -1,0 +1,14 @@
+{
+  "base_url": "https://api.plane.so/api/v1",
+  "workspace_slug": "your-workspace",
+  "display_name": "Your Plane display name",
+  "credential_account": "your-user-account",
+  "default_project": "demo",
+  "projects": {
+    "demo": {
+      "id": "00000000-0000-0000-0000-000000000000",
+      "identifier": "DEMOPROJECT",
+      "name": "Demo Project"
+    }
+  }
+}
