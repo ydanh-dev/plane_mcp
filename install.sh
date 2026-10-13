@@ -41,4 +41,14 @@ cat > "$BIN/plane-mcp" <<'EOF'
 exec "$HOME/.local/share/plane-mcp/.venv/bin/python" "$HOME/.local/share/plane-mcp/manage.py" "$@"
 EOF
 chmod 755 "$BIN/plane-mcp"
-"$BIN/plane-mcp" setup
+
+# `curl | sh` uses stdin for the installer, so pass the terminal only to the setup wizard.
+if [ ! -t 0 ]; then
+  if ! ( : </dev/tty ) 2>/dev/null; then
+    echo "Interactive setup requires a terminal." >&2
+    exit 1
+  fi
+  "$BIN/plane-mcp" setup </dev/tty
+else
+  "$BIN/plane-mcp" setup
+fi
