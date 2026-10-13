@@ -58,14 +58,14 @@ The setup wizard asks for:
 3. Your Plane display name, used as the default assignee filter.
 4. Project key, project identifier/task-code prefix, project UUID, and label for each project.
 5. Default project key for task-list requests that omit a project.
-6. Plane API token (hidden while typing; saved in macOS Keychain).
+6. Plane API token (hidden while typing; saved in the operating system credential store).
 
 The resulting JSON contains configuration only, not the API token. Protect the file because it identifies the projects this installation may access:
 
-```text
-~/.config/plane-mcp/config.json    mode 0600 on macOS/Linux; Windows user-profile ACL
-macOS Keychain / Windows Credential Manager / Linux Secret Service    service plane-mcp
-```
+| Data | Where it is stored | Protection |
+| --- | --- | --- |
+| User and project settings | `~/.config/plane-mcp/config.json` | File permissions on macOS/Linux; user-profile ACL on Windows |
+| Plane API token | OS credential store, service `plane-mcp` | macOS Keychain, Windows Credential Manager, or Linux Secret Service |
 
 Project keys are personal aliases such as `np`, `busan`, or `ntssv2`. The Plane identifier is the prefix in task codes; the UUID is the project ID from Plane. Only configured project UUIDs can be read. A task code with an unknown prefix is rejected before an API request.
 
@@ -221,14 +221,14 @@ Wizard sẽ hỏi:
 3. Display name trên Plane, dùng làm assignee mặc định khi lọc task.
 4. Project key, identifier/prefix task, UUID project và tên hiển thị cho mỗi project.
 5. Project mặc định khi yêu cầu liệt kê task không chỉ định project.
-6. Plane API token (không hiển thị khi nhập; được lưu vào macOS Keychain).
+6. Plane API token (không hiển thị khi nhập; được lưu trong kho credential của hệ điều hành).
 
 File JSON chỉ chứa cấu hình, không chứa API token. Hãy bảo vệ file này vì nó xác định các project MCP được phép truy cập:
 
-```text
-~/.config/plane-mcp/config.json    quyền 0600 trên macOS/Linux; ACL của user trên Windows
-macOS Keychain / Windows Credential Manager / Linux Secret Service    service plane-mcp
-```
+| Dữ liệu | Nơi lưu | Bảo vệ |
+| --- | --- | --- |
+| Cấu hình user và project | `~/.config/plane-mcp/config.json` | Quyền file trên macOS/Linux; ACL user profile trên Windows |
+| Plane API token | Kho credential của OS, service `plane-mcp` | Keychain trên macOS, Credential Manager trên Windows, Secret Service trên Linux |
 
 Project key là bí danh cá nhân, ví dụ `np`, `busan`, `ntssv2`. Plane identifier là prefix trong mã task; UUID là project ID lấy từ Plane. MCP chỉ đọc các UUID đã khai báo. Mã task có prefix chưa cấu hình sẽ bị từ chối trước khi gọi API.
 
