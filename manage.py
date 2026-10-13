@@ -43,7 +43,7 @@ def python_executable() -> Path:
 def setup() -> None:
     previous = load_config()
     print("Plane MCP setup — user-local config; token is stored in the operating system credential store.\n")
-    base_url = input(f"Plane API base URL [{previous.get('base_url', 'https://api.plane.so/api/v1')}]: ").strip()
+    base_url = input(f"Plane API base URL [{previous.get('base_url', 'https://api.plane.so/api/v1')}] (Enter = keep default / nhấn Enter để giữ): ").strip()
     base_url = base_url or str(previous.get("base_url", "https://api.plane.so/api/v1"))
     if urlparse(base_url).scheme != "https":
         raise SystemExit("Plane API URL must use HTTPS")

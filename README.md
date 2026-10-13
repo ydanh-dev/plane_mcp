@@ -53,7 +53,7 @@ Linux requires an active Secret Service implementation on the desktop session. I
 
 The setup wizard asks for:
 
-1. Plane API base URL (defaults to `https://api.plane.so/api/v1`).
+1. Plane API base URL (`https://api.plane.so/api/v1` for Plane Cloud; press Enter to keep it. Change only for self-hosted Plane).
 2. Plane workspace slug.
 3. Your Plane display name, used as the default assignee filter.
 4. Project key, project identifier/task-code prefix, project UUID, and label for each project.
@@ -216,7 +216,7 @@ Linux cần Secret Service đang hoạt động trong phiên desktop. Nếu khô
 
 Wizard sẽ hỏi:
 
-1. Plane API base URL (mặc định `https://api.plane.so/api/v1`).
+1. Plane API base URL (`https://api.plane.so/api/v1` nếu dùng Plane Cloud; nhấn Enter để giữ mặc định. Chỉ đổi nếu tự host Plane).
 2. Workspace slug trên Plane.
 3. Display name trên Plane, dùng làm assignee mặc định khi lọc task.
 4. Project key, identifier/prefix task, UUID project và tên hiển thị cho mỗi project.
