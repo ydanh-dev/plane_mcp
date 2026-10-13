@@ -60,7 +60,7 @@ def setup() -> None:
         projects.update(old_projects)
     print("\nAdd or update projects. Leave the key empty when done.")
     while True:
-        key = input("Project key (e.g. np, busan, ntssv2): ").strip()
+        key = input("Project key (e.g. np, busan, ntssv2; press Enter when done / nhấn Enter khi xong): ").strip()
         if not key:
             break
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", key):
