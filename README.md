@@ -119,9 +119,9 @@ Cloud Run requires an active billing account. Its free tier is usage-based, not 
 
 ### Experimental Cloudflare Workers backend
 
-`cloudflare/worker` contains a stateless Worker prototype for the same MCP tools and attachment flow. It has been tested locally with fake Plane responses; it has **not** been deployed or benchmarked against the company Plane instance.
+The stateless Worker is deployed at `https://plane-mcp.apetechs.workers.dev/mcp` with the NP, Busan, and NTSSv2 projects allowlisted. Its health endpoint and MCP initialization/tool discovery are verified. A live Plane API request and end-to-end task latency benchmark have not been run.
 
-To try it, install Node.js 20+, then from `cloudflare/worker` run `npm ci` and `npm test`. Before deploying, edit `wrangler.jsonc` and set `PLANE_PROJECTS_JSON` to the union of projects the service may expose, for example `{"np":{"id":"PROJECT-UUID","identifier":"NP"}}`; set `PLANE_DEFAULT_PROJECT` to a key in that object. These are project IDs and identifiers only—never put a Plane token there. Then run `npx wrangler login`, `npx wrangler deploy`, and on each local client run `plane-mcp remote https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/mcp`.
+After installing and configuring the local Plane MCP (including the user's own Plane token in the OS credential store), run `plane-mcp remote https://plane-mcp.apetechs.workers.dev/mcp`, then reload Codex or Antigravity. To develop the Worker, install Node.js 20+, then from `cloudflare/worker` run `npm ci` and `npm test`. For redeploys, pass the production `PLANE_PROJECTS_JSON` and `PLANE_DEFAULT_PROJECT` as Wrangler `--var` values; copy the existing values from the Cloudflare dashboard because project IDs are intentionally not committed here. Never put Plane tokens in these variables.
 
 The local bridge still reads each user's Plane token from the OS credential store and sends it to the configured Worker over HTTPS for each uncached call. The Worker forwards it to Plane in memory and does not store it. Only deploy to an account you control and trust. The local bridge caches successful tool responses for 60 seconds per token; `force_refresh=true` bypasses that cache.
 
@@ -294,9 +294,9 @@ Cloud Run yêu cầu project có billing account hoạt động. Free tier tính
 
 ### Prototype backend Cloudflare Workers
 
-`cloudflare/worker` có prototype Worker stateless chạy cùng MCP tools và luồng tải attachment. Đã test local bằng dữ liệu Plane giả lập; **chưa deploy** và chưa benchmark với Plane công ty.
+Worker stateless đã được deploy tại `https://plane-mcp.apetechs.workers.dev/mcp`, với allowlist gồm NP, Busan và NTSSv2. Đã xác minh health endpoint, MCP initialization và danh sách tools. Chưa gọi Plane API thật và chưa benchmark thời gian đọc task end-to-end.
 
-Muốn thử, cài Node.js 20+, vào `cloudflare/worker`, chạy `npm ci` và `npm test`. Trước khi deploy, sửa `wrangler.jsonc`: đặt `PLANE_PROJECTS_JSON` thành danh sách các project server được phép truy cập, ví dụ `{"np":{"id":"PROJECT-UUID","identifier":"NP"}}`; đặt `PLANE_DEFAULT_PROJECT` bằng một key trong danh sách. Chỉ điền project ID/identifier, tuyệt đối không đưa Plane token vào đây. Sau đó chạy `npx wrangler login`, `npx wrangler deploy`; trên mỗi máy local chạy `plane-mcp remote https://TEN-WORKER.TEN-SUBDOMAIN.workers.dev/mcp`.
+Sau khi cài và cấu hình Plane MCP local (bao gồm token Plane riêng của user trong kho credential hệ điều hành), chạy `plane-mcp remote https://plane-mcp.apetechs.workers.dev/mcp`, rồi reload Codex hoặc Antigravity. Để phát triển Worker, cài Node.js 20+, vào `cloudflare/worker`, chạy `npm ci` và `npm test`. Khi deploy lại, truyền `PLANE_PROJECTS_JSON` và `PLANE_DEFAULT_PROJECT` production bằng tham số Wrangler `--var`; lấy giá trị hiện tại trong Cloudflare dashboard vì project ID được cố ý giữ ngoài repo. Tuyệt đối không đưa Plane token vào các biến này.
 
 Local bridge vẫn lấy token của từng user từ credential store hệ điều hành và gửi qua HTTPS tới Worker cho mỗi lần gọi chưa có cache. Worker chuyển tiếp token tới Plane trong bộ nhớ rồi không lưu lại. Chỉ deploy lên tài khoản bạn quản lý và tin cậy. Local bridge cache kết quả tool thành công trong 60 giây theo từng token; `force_refresh=true` bỏ qua cache.
 
