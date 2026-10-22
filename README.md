@@ -39,6 +39,8 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 The one-line form executes the downloaded installer directly. Inspect it first if you prefer to review installation scripts before execution.
 
+For manual source review, download [Plane MCP v0.2.0 (.zip)](https://github.com/ydanh-dev/plane_mcp/releases/download/v0.2.0/plane-mcp-v0.2.0.zip).
+
 On Windows, download and inspect `install.ps1`, then run it in PowerShell:
 
 ```powershell
@@ -215,6 +217,8 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 ```
 
 Dạng một dòng thực thi trực tiếp installer vừa tải về. Nếu muốn xem script trước, hãy dùng cách tải file rồi đọc ở trên.
+
+Nếu muốn xem source thủ công, tải [Plane MCP v0.2.0 (.zip)](https://github.com/ydanh-dev/plane_mcp/releases/download/v0.2.0/plane-mcp-v0.2.0.zip).
 
 Trên Windows, tải và đọc `install.ps1`, sau đó chạy bằng PowerShell:
 
