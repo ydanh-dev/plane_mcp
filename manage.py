@@ -4,18 +4,25 @@
 from __future__ import annotations
 
 import getpass
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
+import zlib
 from pathlib import Path
+from pathlib import PurePosixPath
 from uuid import UUID
 
-REPO = "https://github.com/ydanh-dev/plane_mcp.git"
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/VERSION"
+GITHUB_ARCHIVE_URL = "https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/{tag}.zip"
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = Path.home() / ".config/plane-mcp/config.json"
 PLANE_BASE_URL = "https://plane.apetechs.co/api/v1"
@@ -161,17 +168,120 @@ def setup() -> None:
 
 
 def latest_tag() -> str:
-    output = run(["git", "-C", str(ROOT), "tag", "--list", "v*", "--sort=-version:refname"], capture_output=True).stdout
-    tags = [tag for tag in output.splitlines() if re.fullmatch(r"v\d+\.\d+\.\d+", tag)]
-    if not tags:
-        raise SystemExit("No stable version tags found on this checkout")
-    return tags[0]
+    request = urllib.request.Request(GITHUB_VERSION_URL, headers={"User-Agent": "plane-mcp-installer"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            version = response.read(64).decode("ascii").strip()
+    except (urllib.error.URLError, TimeoutError, UnicodeDecodeError) as error:
+        raise SystemExit("Could not check for updates on GitHub; check network access and retry.") from error
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise SystemExit("GitHub returned an invalid Plane MCP version.")
+    return f"v{version}"
+
+
+def installed_tag() -> str:
+    try:
+        version = (ROOT / "VERSION").read_text().strip()
+    except OSError:
+        return "unknown"
+    return f"v{version}" if re.fullmatch(r"\d+\.\d+\.\d+", version) else "unknown"
+
+
+def install_archive(tag: str) -> None:
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        raise RuntimeError("Invalid Plane MCP release tag")
+    request = urllib.request.Request(
+        GITHUB_ARCHIVE_URL.format(tag=urllib.parse.quote(tag, safe="")),
+        headers={"User-Agent": "plane-mcp-installer", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            archive_data = response.read()
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise RuntimeError("Could not download the update archive from GitHub") from error
+
+    with tempfile.TemporaryDirectory(prefix="plane-mcp-update-") as temporary:
+        temporary_path = Path(temporary)
+        source = temporary_path / "source"
+        backup = temporary_path / "backup"
+        source.mkdir()
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(archive_data))
+        except zipfile.BadZipFile as error:
+            raise RuntimeError("GitHub returned an invalid source archive") from error
+        with archive:
+            roots = {PurePosixPath(name).parts[0] for name in archive.namelist() if PurePosixPath(name).parts}
+            if len(roots) != 1:
+                raise RuntimeError("GitHub returned an unexpected source archive layout")
+            archive_root = next(iter(roots))
+            if any(char in archive_root for char in "\\:"):
+                raise RuntimeError("GitHub returned an unexpected source archive layout")
+            source_files = []
+            for entry in archive.infolist():
+                archive_path = PurePosixPath(entry.filename)
+                parts = archive_path.parts
+                if entry.is_dir() and len(parts) == 1 and parts[0] == archive_root:
+                    continue
+                if archive_path.is_absolute() or len(parts) < 2 or parts[0] != archive_root:
+                    raise RuntimeError("GitHub returned an unexpected source archive path")
+                relative = parts[1:]
+                if not relative or any(part in {"..", "."} or "\\" in part or ":" in part for part in relative):
+                    raise RuntimeError("GitHub source archive contains an unsafe path")
+                if entry.is_dir():
+                    continue
+                if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise RuntimeError("GitHub source archive contains an unsupported symbolic link")
+                destination = source.joinpath(*relative)
+                if not destination.resolve().is_relative_to(source.resolve()):
+                    raise RuntimeError("GitHub source archive path escaped the extraction directory")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    destination.write_bytes(archive.read(entry))
+                except (zipfile.BadZipFile, zlib.error) as error:
+                    raise RuntimeError("GitHub source archive is corrupt") from error
+                source_files.append(destination)
+            if not source_files or not (source / "manage.py").is_file():
+                raise RuntimeError("GitHub source archive is missing Plane MCP files")
+            if (source / "VERSION").read_text().strip() != tag.removeprefix("v"):
+                raise RuntimeError("GitHub source archive version does not match the requested tag")
+
+        changed: list[tuple[Path, Path | None]] = []
+        try:
+            # shortcut: files removed from a release remain on disk; prune only with a managed-file manifest.
+            for source_file in source_files:
+                relative = source_file.relative_to(source)
+                if relative.parts[0] in {".venv", ".python", ".tools", "tmp"}:
+                    raise RuntimeError("GitHub source archive contains a reserved local data path")
+                destination = ROOT / relative
+                if not destination.resolve().is_relative_to(ROOT.resolve()):
+                    raise RuntimeError("Update path escaped the Plane MCP install directory")
+                saved_copy = None
+                if destination.exists():
+                    if not destination.is_file():
+                        raise RuntimeError(f"Cannot safely update non-file path: {relative}")
+                    saved_copy = backup / relative
+                    saved_copy.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(destination, saved_copy)
+                changed.append((destination, saved_copy))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_file, destination)
+            uv = ROOT / (".tools/uv.exe" if os.name == "nt" else ".tools/uv")
+            if uv.is_file():
+                run([str(uv), "pip", "install", "--python", str(python_executable()), "-r", str(ROOT / "requirements.txt")])
+            else:
+                run([str(python_executable()), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")])
+        except (OSError, subprocess.CalledProcessError, RuntimeError):
+            for destination, saved_copy in reversed(changed):
+                if saved_copy is None:
+                    destination.unlink(missing_ok=True)
+                elif saved_copy.exists():
+                    shutil.copy2(saved_copy, destination)
+            raise
 
 
 def update() -> None:
-    run(["git", "-C", str(ROOT), "fetch", "--tags", "--force", "origin"])
     latest = latest_tag()
-    current = subprocess.run(["git", "-C", str(ROOT), "describe", "--tags", "--exact-match", "HEAD"], text=True, capture_output=True).stdout.strip()
+    current = installed_tag()
     if current == latest:
         print(f"Already using {latest}.")
         return
@@ -179,16 +289,10 @@ def update() -> None:
     if input("Update now? [y/N]: ").strip().lower() not in {"y", "yes"}:
         print("Kept the installed version. Run `plane-mcp update` to check again later.")
         return
-    old_head = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
-    changed = run(["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True).stdout.strip()
-    if changed:
-        raise SystemExit("Update stopped: managed install has local file changes. Back them up or reinstall before updating.")
     try:
-        run(["git", "-C", str(ROOT), "checkout", "--detach", latest])
-        run([str(python_executable()), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")])
-    except (subprocess.CalledProcessError, OSError):
-        subprocess.run(["git", "-C", str(ROOT), "checkout", "--detach", old_head], check=False)
-        raise
+        install_archive(latest)
+    except (subprocess.CalledProcessError, OSError, RuntimeError) as error:
+        raise SystemExit(f"Update failed; Plane MCP source files were rolled back: {error}") from error
     print(f"Updated to {latest}. Restart the MCP host to load it.")
 
 
@@ -221,7 +325,7 @@ def main() -> None:
         update()
     elif sys.argv[1] == "status":
         config = load_config()
-        print(f"Install: {ROOT}\nVersion: {subprocess.run(['git', '-C', str(ROOT), 'describe', '--tags', '--exact-match', 'HEAD'], text=True, capture_output=True).stdout.strip() or 'development'}\nConfig: {CONFIG_PATH}\nProjects: {', '.join(config.get('projects', {}).keys())}")
+        print(f"Install: {ROOT}\nVersion: {installed_tag()}\nConfig: {CONFIG_PATH}\nProjects: {', '.join(config.get('projects', {}).keys())}")
     elif sys.argv[1] == "remote" and len(sys.argv) == 3:
         set_remote_url(sys.argv[2])
     else:

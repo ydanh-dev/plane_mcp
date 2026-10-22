@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -6,6 +7,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import zipfile
 from contextlib import nullcontext, redirect_stdout
 from io import StringIO
 from unittest.mock import patch
@@ -18,37 +20,68 @@ SPEC.loader.exec_module(manage)
 
 
 class UpdateTests(unittest.TestCase):
-    def test_latest_tag_uses_semantic_version_order(self):
-        result = subprocess.CompletedProcess([], 0, "v1.10.0\nv1.9.0\nv2.0.0-rc.1\nv1.10.0\n", "")
-        with patch.object(manage, "run", return_value=result):
-            self.assertEqual(manage.latest_tag(), "v1.10.0")
+    def test_latest_tag_reads_and_validates_github_version_manifest(self):
+        response = SimpleNamespace(read=lambda *_args: b"0.2.3\n")
+        with patch.object(manage.urllib.request, "urlopen", return_value=nullcontext(response)):
+            self.assertEqual(manage.latest_tag(), "v0.2.3")
 
-    def test_no_keeps_current_version_without_remembering_a_skip(self):
-        with tempfile.TemporaryDirectory() as directory:
-            config_path = Path(directory) / "config.json"
-            config_path.write_text('{"projects": {"demo": {}}}')
-            fetch_result = subprocess.CompletedProcess([], 0, "", "")
-            tags_result = subprocess.CompletedProcess([], 0, "v0.2.0\nv0.1.0\n", "")
-            with patch.object(manage, "CONFIG_PATH", config_path), \
-                 patch.object(manage, "run", side_effect=[fetch_result, tags_result]), \
-                 patch.object(manage.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "v0.1.0", "")), \
-                 patch.object(manage, "input", create=True, return_value="n"):
-                manage.update()
-            self.assertNotIn("skipped_version", json.loads(config_path.read_text()))
-
-    def test_yes_updates_to_latest_tag(self):
-        fetch_result = subprocess.CompletedProcess([], 0, "", "")
-        tags_result = subprocess.CompletedProcess([], 0, "v0.2.0\nv0.1.0\n", "")
-        head_result = subprocess.CompletedProcess([], 0, "abc123", "")
-        clean_result = subprocess.CompletedProcess([], 0, "", "")
-        with patch.object(manage, "run", side_effect=[fetch_result, tags_result, head_result, clean_result, clean_result, clean_result]) as run, \
-             patch.object(manage.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "v0.1.0", "")), \
-             patch.object(manage, "input", create=True, return_value="y"), \
-             patch.object(manage, "python_executable", return_value=Path("python")), \
-             patch("builtins.print"):
+    def test_no_keeps_current_version(self):
+        with patch.object(manage, "latest_tag", return_value="v0.2.3"), \
+             patch.object(manage, "installed_tag", return_value="v0.2.2"), \
+             patch.object(manage, "install_archive") as install_archive, \
+             patch("builtins.input", return_value="n"), redirect_stdout(StringIO()):
             manage.update()
-        self.assertEqual(run.call_args_list[4].args[0][-1], "v0.2.0")
-        self.assertEqual(run.call_args_list[5].args[0][1:3], ["-m", "pip"])
+        install_archive.assert_not_called()
+
+    def test_yes_installs_latest_tag(self):
+        with patch.object(manage, "latest_tag", return_value="v0.2.3"), \
+             patch.object(manage, "installed_tag", return_value="v0.2.2"), \
+             patch.object(manage, "install_archive") as install_archive, \
+             patch("builtins.input", return_value="y"), redirect_stdout(StringIO()):
+            manage.update()
+        install_archive.assert_called_once_with("v0.2.3")
+
+    def test_archive_update_rolls_back_source_files_and_preserves_runtime(self):
+        archive_data = io.BytesIO()
+        with zipfile.ZipFile(archive_data, "w") as archive:
+            archive.writestr("plane_mcp-0.2.3/VERSION", "0.2.3\n")
+            archive.writestr("plane_mcp-0.2.3/manage.py", "updated source")
+            archive.writestr("plane_mcp-0.2.3/requirements.txt", "mcp==1.30.0\n")
+        response = SimpleNamespace(read=lambda: archive_data.getvalue())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "VERSION").write_text("0.2.2\n")
+            (root / "manage.py").write_text("previous source")
+            (root / ".venv").mkdir()
+            (root / ".venv" / "keep.txt").write_text("runtime")
+            (root / ".tools").mkdir()
+            (root / ".tools" / "uv").write_text("uv")
+            with patch.object(manage, "ROOT", root), \
+                 patch.object(manage.urllib.request, "urlopen", return_value=nullcontext(response)), \
+                 patch.object(manage, "python_executable", return_value=Path("python")), \
+                 patch.object(manage, "run", side_effect=subprocess.CalledProcessError(1, "uv")) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    manage.install_archive("v0.2.3")
+            self.assertEqual(run.call_args.args[0], [
+                str(root / ".tools" / "uv"), "pip", "install", "--python", "python", "-r", str(root / "requirements.txt")
+            ])
+            self.assertEqual((root / "VERSION").read_text(), "0.2.2\n")
+            self.assertEqual((root / "manage.py").read_text(), "previous source")
+            self.assertEqual((root / ".venv" / "keep.txt").read_text(), "runtime")
+            self.assertFalse((root / "requirements.txt").exists())
+
+    def test_archive_update_rejects_parent_traversal(self):
+        archive_data = io.BytesIO()
+        with zipfile.ZipFile(archive_data, "w") as archive:
+            archive.writestr("plane_mcp-0.2.3/VERSION", "0.2.3\n")
+            archive.writestr("plane_mcp-0.2.3/manage.py", "source")
+            archive.writestr("plane_mcp-0.2.3/../../outside.txt", "unsafe")
+        response = SimpleNamespace(read=lambda: archive_data.getvalue())
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(manage, "ROOT", Path(directory)), \
+                 patch.object(manage.urllib.request, "urlopen", return_value=nullcontext(response)):
+                with self.assertRaisesRegex(RuntimeError, "unsafe path"):
+                    manage.install_archive("v0.2.3")
 
 
 class SetupTests(unittest.TestCase):

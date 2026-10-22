@@ -17,7 +17,8 @@ User-wide MCP server for Plane. It runs locally by default and can optionally us
 ### Requirements
 
 - macOS 11+, Windows, or desktop Linux with a Secret Service provider (such as GNOME Keyring or KDE Wallet).
-- Python 3.10+ and Git.
+- No preinstalled Python or Git is required. The installer downloads `uv`, a private Python 3.12 runtime, and the MCP dependencies into the Plane MCP install directory.
+- Internet access and `curl`/`tar` on macOS/Linux, or PowerShell on Windows.
 - A Plane API token with read access to the projects you configure.
 - Codex CLI/Desktop or Antigravity for MCP use.
 
@@ -31,7 +32,7 @@ less /tmp/plane-mcp-install.sh
 sh /tmp/plane-mcp-install.sh
 ```
 
-On macOS/Linux, the installer clones the public repository to `~/.local/share/plane-mcp`, creates a Python virtual environment, installs dependencies, and starts first-time setup. It does not overwrite an existing non-managed directory. To use a one-line bootstrap instead, run:
+On macOS/Linux, the installer downloads the latest tagged source, installs a private Python runtime and dependencies under `~/.local/share/plane-mcp`, then starts first-time setup. It does not overwrite an existing directory. To use a one-line bootstrap, run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh | sh
@@ -39,9 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 The one-line form executes the downloaded installer directly. Inspect it first if you prefer to review installation scripts before execution.
 
-For manual source review, download [Plane MCP v0.2.2 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.2.zip).
+For manual source review, download [Plane MCP v0.2.3 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.3.zip).
 
-On Windows, download and inspect `install.ps1`, then run it in PowerShell:
+On Windows, the installer also installs a private Python runtime and dependencies; Python and Git do not need to be installed first. To inspect the script before running it:
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.ps1 -OutFile "$env:TEMP\plane-mcp-install.ps1"
@@ -49,7 +50,13 @@ notepad "$env:TEMP\plane-mcp-install.ps1"
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\plane-mcp-install.ps1"
 ```
 
-Linux requires an active Secret Service implementation on the desktop session. If no secure credential backend is available, setup stops instead of writing the Plane token to a plain-text file.
+Or install directly from PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.ps1 | iex
+```
+
+Linux requires an active Secret Service implementation on the desktop session. If no secure credential backend is available, setup stops instead of writing the Plane token to a plain-text file. The installer does not install system credential services or change Linux package settings.
 
 ### First-time setup
 
@@ -139,9 +146,9 @@ Run this when you want to check for a release:
 plane-mcp update
 ```
 
-The updater fetches version tags from GitHub and asks `Update now? [y/N]`. Yes installs the latest release; No keeps the current version and you can check again later. It preserves user config and the OS credential-store token, and returns to the prior code version if dependency installation fails. Restart the MCP host after updating. Updates are checked only when you run this command or rerun the installer; MCP clients do not provide a shared interactive update prompt.
+The updater checks the small `VERSION` file on GitHub and asks `Update now? [y/N]`. Yes downloads the matching tagged source archive from GitHub and installs it; No keeps the current version. This update path needs neither Git nor Cloudflare. It preserves user config and the OS credential-store token, and rolls source files back if installation fails. Restart the MCP host after updating. Updates are checked when you run this command or rerun the installer; MCP clients do not provide a shared interactive update prompt.
 
-There is no always-on update service and no automatic change to the installed version. To publish an update, the maintainer pushes a semantic version tag (for example, `v0.2.0`). Users choose when to install it.
+There is no background service, so users will not get a pop-up while the MCP is idle. To check, run `plane-mcp update`; the maintainer publishes a new `VERSION` and matching semantic version tag (for example, `0.2.3` and `v0.2.3`), then users choose whether to install it.
 
 Other commands:
 
@@ -154,7 +161,7 @@ plane-mcp remote off
 
 ### Troubleshooting
 
-- `plane-mcp: command not found`: add `~/.local/bin` to `PATH`, then open a new terminal.
+- `plane-mcp: command not found`: add `~/.local/bin` to `PATH`, then open a new terminal. On Windows, open a new PowerShell after installation or call `%USERPROFILE%\.local\bin\plane-mcp.cmd` directly.
 - Token error: rerun `plane-mcp setup` and enter a valid Plane API token.
 - Project unavailable: check that the workspace slug, project UUID, and token permissions match Plane.
 - Task prefix rejected: configure the matching Plane identifier in `projects`.
@@ -174,7 +181,7 @@ cd cloudflare/worker && npm ci && npm test && npx wrangler deploy --dry-run
 
 - In local mode, Plane credentials are sent directly to the configured Plane API host. In Cloud Run or Cloudflare Worker mode, the token also passes through the configured HTTPS MCP service in memory; it remains in the OS credential store locally and is not written to JSON or persisted by this MCP.
 - Project allowlisting is enforced by the MCP before reading task details or listing work items. Plane permissions remain the underlying access boundary.
-- GitHub is used to download source and check release tags. Cloud hosting is optional; the Cloudflare Worker is only a local-tested prototype and the operator controls any deployment.
+- GitHub is used to download the installer/source and check the `VERSION` file. This release update flow does not use Cloudflare or Git. Cloud hosting remains optional.
 - Updating is a terminal workflow. MCP clients do not share a common update-confirmation dialog, so this release does not display a clickable update modal inside Codex or Antigravity.
 - Linux setup needs a logged-in desktop session with a working Secret Service provider. Headless Linux without that service is not supported by the secure setup flow.
 - **License:** not yet specified. Public visibility does not itself grant permission to redistribute or modify this software; the maintainer must add a license before granting those rights.
@@ -198,7 +205,8 @@ Plane MCP dùng chung ở cấp user và mặc định chạy cục bộ. Có th
 ### Yêu cầu
 
 - macOS 11+, Windows, hoặc Linux desktop có Secret Service (ví dụ GNOME Keyring hoặc KDE Wallet).
-- Python 3.10+ và Git.
+- Không cần cài Python hay Git trước. Installer tải `uv`, Python 3.12 riêng và các thư viện MCP vào thư mục cài Plane MCP.
+- Cần Internet và `curl`/`tar` trên macOS/Linux, hoặc PowerShell trên Windows.
 - Plane API token có quyền đọc các project cần cấu hình.
 - Codex CLI/Desktop hoặc Antigravity để sử dụng MCP.
 
@@ -212,7 +220,7 @@ less /tmp/plane-mcp-install.sh
 sh /tmp/plane-mcp-install.sh
 ```
 
-Trên macOS/Linux, installer clone repo công khai vào `~/.local/share/plane-mcp`, tạo Python virtual environment, cài dependencies và mở setup lần đầu. Installer không ghi đè thư mục có sẵn không do nó quản lý. Nếu muốn dùng lệnh bootstrap một dòng:
+Trên macOS/Linux, installer tải source theo tag mới nhất, tự cài Python riêng cùng dependencies vào `~/.local/share/plane-mcp`, rồi mở setup lần đầu. Installer không ghi đè thư mục đã tồn tại. Dùng lệnh bootstrap một dòng:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh | sh
@@ -220,9 +228,9 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 Dạng một dòng thực thi trực tiếp installer vừa tải về. Nếu muốn xem script trước, hãy dùng cách tải file rồi đọc ở trên.
 
-Nếu muốn xem source thủ công, tải [Plane MCP v0.2.2 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.2.zip).
+Nếu muốn xem source thủ công, tải [Plane MCP v0.2.3 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.3.zip).
 
-Trên Windows, tải và đọc `install.ps1`, sau đó chạy bằng PowerShell:
+Trên Windows, installer cũng tự cài Python riêng và dependencies; không cần cài Python hay Git trước. Để xem script trước khi chạy:
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.ps1 -OutFile "$env:TEMP\plane-mcp-install.ps1"
@@ -230,7 +238,13 @@ notepad "$env:TEMP\plane-mcp-install.ps1"
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\plane-mcp-install.ps1"
 ```
 
-Linux cần Secret Service đang hoạt động trong phiên desktop. Nếu không có credential backend bảo mật, setup sẽ dừng thay vì ghi Plane token vào file text thường.
+Hoặc cài trực tiếp bằng PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.ps1 | iex
+```
+
+Linux cần Secret Service đang hoạt động trong phiên desktop. Nếu không có credential backend bảo mật, setup sẽ dừng thay vì ghi Plane token vào file text thường. Installer không tự cài dịch vụ credential hệ thống hoặc thay đổi cấu hình package của Linux.
 
 ### Cấu hình lần đầu
 
@@ -318,9 +332,9 @@ Khi muốn kiểm tra có bản mới, chạy:
 plane-mcp update
 ```
 
-Updater lấy version tags từ GitHub rồi hỏi `Update now? [y/N]`. Chọn Yes để cài bản mới nhất; No giữ nguyên bản hiện tại và có thể kiểm tra lại lần sau. Config user cùng token trong credential store được giữ nguyên. Nếu cài dependency lỗi, updater quay lại phiên bản code trước đó. Sau khi cập nhật, restart MCP host. Việc kiểm tra chỉ chạy khi gọi lệnh này hoặc chạy lại installer; MCP client không có một hộp thoại cập nhật tương tác dùng chung.
+Updater đọc file `VERSION` nhỏ trên GitHub rồi hỏi `Update now? [y/N]`. Chọn Yes để tải source theo tag tương ứng và cài; No giữ nguyên bản hiện tại. Cách update này không cần Git hay Cloudflare. Config user cùng token trong credential store được giữ nguyên; nếu cài đặt lỗi, updater khôi phục các file source. Sau khi cập nhật, restart MCP host. Việc kiểm tra chạy khi gọi lệnh này hoặc chạy lại installer; MCP client không có hộp thoại xác nhận cập nhật dùng chung.
 
-Không có dịch vụ update chạy nền và phiên bản đang cài không tự thay đổi. Để phát hành bản mới, maintainer push một semantic version tag, ví dụ `v0.2.0`. User tự chọn thời điểm cập nhật.
+Không có dịch vụ chạy nền nên user không nhận popup khi MCP đang nghỉ. Để kiểm tra, chạy `plane-mcp update`; maintainer phát hành `VERSION` và tag trùng nhau (ví dụ `0.2.3` và `v0.2.3`), sau đó user chọn có cập nhật hay không.
 
 Các lệnh khác:
 
@@ -333,7 +347,7 @@ plane-mcp remote off
 
 ### Khắc phục sự cố
 
-- `plane-mcp: command not found`: thêm `~/.local/bin` vào `PATH`, sau đó mở terminal mới.
+- `plane-mcp: command not found`: thêm `~/.local/bin` vào `PATH`, sau đó mở terminal mới. Trên Windows, mở PowerShell mới sau khi cài hoặc chạy trực tiếp `%USERPROFILE%\.local\bin\plane-mcp.cmd`.
 - Lỗi token: chạy lại `plane-mcp setup` và nhập Plane API token hợp lệ.
 - Không tìm thấy project: kiểm tra project UUID và quyền token trên Plane.
 - Prefix task bị từ chối: chạy lại setup và thêm project tương ứng bằng UUID.
@@ -353,7 +367,7 @@ cd cloudflare/worker && npm ci && npm test && npx wrangler deploy --dry-run
 
 - Ở chế độ local, Plane token được gửi thẳng tới Plane API host đã cấu hình. Ở chế độ Cloud Run hoặc Cloudflare Worker, token cũng đi qua MCP service HTTPS đã cấu hình trong bộ nhớ; token vẫn nằm trong credential store của OS và không được ghi vào JSON hay lưu lại bởi MCP.
 - MCP kiểm tra allowlist trước khi đọc task hoặc liệt kê work items. Quyền Plane của token vẫn là lớp giới hạn truy cập bên dưới.
-- GitHub được dùng để tải source và kiểm tra version tags. Cloud hosting là tùy chọn; Cloudflare Worker hiện chỉ là prototype đã test local, operator tự quản lý việc deploy.
+- GitHub được dùng để tải installer/source và kiểm tra file `VERSION`. Cơ chế update trong bản này không dùng Cloudflare hay Git. Cloud hosting vẫn là tùy chọn.
 - Cập nhật chạy qua terminal. MCP clients không có hộp thoại xác nhận cập nhật chung, nên bản này không hiện modal có nút bấm ngay trong Codex hay Antigravity.
 - Linux cần phiên desktop đăng nhập và Secret Service provider hoạt động. Linux headless không có dịch vụ này chưa được hỗ trợ trong luồng setup an toàn.
 - **Giấy phép:** chưa được chỉ định. Repo công khai không tự cấp quyền phân phối lại hay chỉnh sửa phần mềm; maintainer cần thêm license trước khi cấp các quyền đó.
