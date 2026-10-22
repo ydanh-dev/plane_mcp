@@ -1,9 +1,11 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
 """User-wide local MCP server for reading Plane work items."""
 
 from __future__ import annotations
 
 import base64
+import contextvars
+import hashlib
 import html
 import json
 import mimetypes
@@ -18,6 +20,8 @@ import time
 import urllib.parse
 import urllib.error
 import urllib.request
+from contextvars import copy_context
+from functools import partial
 from uuid import UUID
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timezone
@@ -28,22 +32,27 @@ from typing import Any, Callable
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+import anyio
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import ToolAnnotations
+from starlette.responses import JSONResponse, PlainTextResponse
 
 CONFIG_PATH = Path(os.environ.get("PLANE_MCP_CONFIG", Path.home() / ".config/plane-mcp/config.json"))
 try:
-    USER_CONFIG = json.loads(CONFIG_PATH.read_text())
+    CONFIG_JSON = os.environ.get("PLANE_MCP_CONFIG_JSON", "")
+    USER_CONFIG = json.loads(CONFIG_JSON) if CONFIG_JSON else json.loads(CONFIG_PATH.read_text())
 except FileNotFoundError as error:
     raise RuntimeError(f"Plane MCP is not configured. Run `plane-mcp setup` ({CONFIG_PATH})") from error
 except (OSError, json.JSONDecodeError) as error:
     raise RuntimeError(f"Cannot read Plane MCP config at {CONFIG_PATH}: {error}") from error
 
-PLANE_BASE_URL = os.environ.get("PLANE_BASE_URL", "https://plane.apetechs.co/api/v1")
-PLANE_WORKSPACE_SLUG = os.environ.get("PLANE_WORKSPACE_SLUG", "apetechs")
+PLANE_BASE_URL = os.environ.get("PLANE_BASE_URL", USER_CONFIG.get("base_url", "https://plane.apetechs.co/api/v1"))
+PLANE_WORKSPACE_SLUG = os.environ.get("PLANE_WORKSPACE_SLUG", USER_CONFIG.get("workspace_slug", "apetechs"))
 PLANE_PROJECTS: dict[str, dict[str, str]] = USER_CONFIG.get("projects", {})
 PLANE_DEFAULT_PROJECT = USER_CONFIG.get("default_project", "")
 PLANE_DEFAULT_ASSIGNEE = os.environ.get("PLANE_DEFAULT_ASSIGNEE", USER_CONFIG.get("display_name", ""))
+REMOTE_MCP_URL = str(os.environ.get("PLANE_MCP_REMOTE_URL", USER_CONFIG.get("remote_mcp_url", "")) or "").strip().rstrip("/")
+HTTP_MODE = os.environ.get("PLANE_MCP_HTTP", "").lower() in {"1", "true", "yes"}
 if not isinstance(PLANE_PROJECTS, dict) or not PLANE_PROJECTS:
     raise RuntimeError(f"At least one project must be configured in {CONFIG_PATH}")
 for project_key, project in PLANE_PROJECTS.items():
@@ -74,7 +83,8 @@ def read_api_token() -> str:
     return token
 
 
-TOKEN = read_api_token()
+TOKEN = "" if HTTP_MODE else read_api_token()
+_request_api_token: contextvars.ContextVar[str | None] = contextvars.ContextVar("plane_api_token", default=None)
 
 CONFIG = {
     "PLANE_BASE_URL": PLANE_BASE_URL,
@@ -248,7 +258,7 @@ class DescriptionRenderer(MarkdownRenderer):
             max_workers = min(5, len(self.pending_images))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_idx = {
-                    executor.submit(self.materialize_image, img_idx, src, alt): parts_idx
+                    submit_with_context(executor, self.materialize_image, img_idx, src, alt): parts_idx
                     for (parts_idx, img_idx, src, alt) in self.pending_images
                 }
                 for future in as_completed(future_to_idx):
@@ -317,11 +327,33 @@ API = CONFIG["PLANE_BASE_URL"].rstrip("/")
 WORKSPACE = CONFIG["PLANE_WORKSPACE_SLUG"]
 DEFAULT_ASSIGNEE = CONFIG["PLANE_DEFAULT_ASSIGNEE"]
 
-if not WORKSPACE or not TOKEN:
+if not WORKSPACE or (not TOKEN and not HTTP_MODE):
     raise RuntimeError("Missing Plane workspace or credential configuration")
 
 
-mcp = FastMCP("Plane")
+def get_api_token() -> str:
+    request_token = _request_api_token.get()
+    token = request_token if request_token is not None else TOKEN
+    if not token:
+        raise RuntimeError("Plane API credential is missing")
+    return token
+
+
+def _token_scope(token: str | None = None) -> str:
+    return hashlib.sha256((token if token is not None else get_api_token()).encode()).hexdigest()
+
+
+def submit_with_context(executor: ThreadPoolExecutor, function: Callable[..., Any], *args: Any, **kwargs: Any):
+    """Carry the active per-request Plane token into worker threads."""
+    return executor.submit(copy_context().run, partial(function, *args, **kwargs))
+
+
+mcp = FastMCP(
+    "Plane",
+    host="0.0.0.0" if HTTP_MODE else "127.0.0.1",
+    port=int(os.environ.get("PORT", "8080")) if HTTP_MODE else 8000,
+    stateless_http=HTTP_MODE,
+)
 
 
 def api_get(path: str, query: dict[str, str] | None = None) -> Any:
@@ -330,7 +362,7 @@ def api_get(path: str, query: dict[str, str] | None = None) -> Any:
         url = f"{url}?{urllib.parse.urlencode(query)}"
     request = urllib.request.Request(
         url,
-        headers={"X-API-Key": TOKEN, "Accept": "application/json", "User-Agent": "plane-mcp/1.0"},
+        headers={"X-API-Key": get_api_token(), "Accept": "application/json", "User-Agent": "plane-mcp/1.0"},
     )
     retry_wait_remaining = 30.0
     for attempt in range(3):
@@ -368,17 +400,139 @@ def api_get(path: str, query: dict[str, str] | None = None) -> Any:
     raise RuntimeError("Plane API retry exhausted")
 
 
+async def _call_remote_tool(url: str, token: str, name: str, arguments: dict[str, Any]) -> Any:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async with streamablehttp_client(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+        sse_read_timeout=300,
+    ) as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            return await session.call_tool(name, arguments)
+
+
+def call_remote_tool(name: str, arguments: dict[str, Any]) -> Any:
+    if not REMOTE_MCP_URL:
+        raise RuntimeError("Remote Plane MCP URL is not configured")
+    parsed = urlparse(REMOTE_MCP_URL)
+    if (parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1"}) or (
+        parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.path.endswith("/mcp")
+    ):
+        raise RuntimeError("Remote Plane MCP URL must be an HTTPS /mcp URL without embedded credentials or query parameters")
+    return anyio.run(_call_remote_tool, REMOTE_MCP_URL, get_api_token(), name, arguments)
+
+
+def remote_text(result: Any) -> str:
+    texts = [block.text for block in result.content if getattr(block, "type", None) == "text"]
+    if result.isError:
+        raise RuntimeError("\n".join(texts) or "Remote Plane MCP request failed")
+    return "\n".join(texts)
+
+
+def remote_project_listing(result: Any) -> str:
+    text = remote_text(result)
+    allowed = {project["identifier"].upper() for project in PLANE_PROJECTS.values()}
+    rows = [
+        line for line in text.splitlines()
+        if "|" in line and line.split("|", 1)[0].strip().upper() in allowed
+    ]
+    if not rows:
+        raise ValueError("None of this user's configured Plane projects are visible to this API user")
+    return "Plane projects\n\n" + "\n".join(rows)
+
+
+def remote_task_content(result: Any) -> list[Any]:
+    content: list[Any] = []
+    texts = [block.text for block in result.content if getattr(block, "type", None) == "text"]
+    if result.isError:
+        raise RuntimeError("\n".join(texts) or "Remote Plane MCP request failed")
+    if texts:
+        content.append("\n".join(texts))
+    for block in result.content:
+        if getattr(block, "type", None) != "image" or not block.mimeType.startswith("image/"):
+            continue
+        format = block.mimeType.split("/", 1)[1]
+        content.append(Image(data=base64.b64decode(block.data, validate=True), format=format))
+    return content
+
+
+def remote_project_filter(requested: str) -> str:
+    if not requested.strip():
+        keys = [PLANE_DEFAULT_PROJECT] if PLANE_DEFAULT_PROJECT else []
+    elif requested.strip().casefold() == "all":
+        keys = list(PLANE_PROJECTS)
+    else:
+        keys = []
+        for value in requested.split(","):
+            term = value.strip().casefold()
+            if not term:
+                continue
+            project_key = next((
+                key for key, project in PLANE_PROJECTS.items()
+                if term in {key.casefold(), project["id"].casefold(), project["identifier"].casefold(), str(project.get("name", "")).casefold()}
+            ), None)
+            keys.append(project_key if project_key is not None else value.strip())
+    return ",".join(PLANE_PROJECTS[key]["identifier"] if key in PLANE_PROJECTS else key for key in keys)
+
+
+class PlaneBearerMiddleware:
+    """Use each remote MCP caller's Plane token only for that request."""
+
+    def __init__(self, app: Callable[..., Any]) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
+        if scope["type"] != "http" or scope.get("path") == "/healthz":
+            await self.app(scope, receive, send)
+            return
+        values = [value for key, value in scope.get("headers", []) if key.lower() == b"authorization"]
+        try:
+            authorization = values[0].decode("ascii") if len(values) == 1 else ""
+        except UnicodeDecodeError:
+            authorization = ""
+        scheme, separator, token = authorization.partition(" ")
+        token = token.strip()
+        if scheme.lower() != "bearer" or not separator or not token or len(token) > 8192:
+            response = JSONResponse({"error": "Unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"})
+            await response(scope, receive, send)
+            return
+
+        request_token = _request_api_token.set(token)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _request_api_token.reset(request_token)
+
+
+async def _health(_request: Any) -> PlainTextResponse:
+    return PlainTextResponse("ok")
+
+
+def run_http_server() -> None:
+    import uvicorn
+
+    app = mcp.streamable_http_app()
+    app.add_route("/healthz", _health, methods=["GET"])
+    app.add_middleware(PlaneBearerMiddleware)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), access_log=False)
+
+
 CACHE_TTL = 60.0  # seconds
 _cache: dict[str, tuple[float, Any]] = {}
 
 
 def get_cached(key: str) -> Any | None:
-    cached = _cache.get(key)
+    cache_key = f"{_token_scope()}:{key}"
+    cached = _cache.get(cache_key)
     if cached is not None:
         timestamp, value = cached
         if time.monotonic() - timestamp < CACHE_TTL:
             return value
-        _cache.pop(key, None)
+        _cache.pop(cache_key, None)
     return None
 
 
@@ -386,7 +540,7 @@ def set_cached(key: str, value: Any) -> Any:
     for expired_key, (timestamp, _) in list(_cache.items()):
         if time.monotonic() - timestamp >= CACHE_TTL:
             _cache.pop(expired_key, None)
-    _cache[key] = (time.monotonic(), value)
+    _cache[f"{_token_scope()}:{key}"] = (time.monotonic(), value)
     return value
 
 
@@ -591,16 +745,19 @@ def configured_projects(project_filter: str = "") -> list[dict[str, str]]:
     ]
 
 
-def find_item(task_identifier: str, include_closed: bool = True, force_refresh: bool = False) -> tuple[dict[str, Any], dict[str, dict[str, str]]]:
-    task_identifier = task_identifier.strip().upper()
-    match = re.fullmatch(r"([A-Z][A-Z0-9]*)-(\d+)", task_identifier)
+def project_for_task_identifier(task_identifier: str) -> tuple[str, int, dict[str, str]]:
+    code = task_identifier.strip().upper()
+    match = re.fullmatch(r"([A-Z][A-Z0-9]*)-(\d+)", code)
     if not match:
         raise ValueError("task_identifier must be a full Plane code such as PROJECT-123")
-    prefix = match.group(1)
-    project = next((p for p in configured_projects("all") if p["identifier"].upper() == prefix), None)
+    project = next((p for p in configured_projects("all") if p["identifier"].upper() == match.group(1)), None)
     if project is None:
-        raise ValueError(f"Task prefix {prefix} is not in this user's configured project allowlist")
-    expected_sequence = int(match.group(2))
+        raise ValueError(f"Task prefix {match.group(1)} is not in this user's configured project allowlist")
+    return code, int(match.group(2)), project
+
+
+def find_item(task_identifier: str, include_closed: bool = True, force_refresh: bool = False) -> tuple[dict[str, Any], dict[str, dict[str, str]]]:
+    task_identifier, expected_sequence, project = project_for_task_identifier(task_identifier)
     cache_key = f"item_{task_identifier}"
     item = None if force_refresh else get_cached(cache_key)
     fetched = item is None
@@ -631,6 +788,8 @@ def find_item(task_identifier: str, include_closed: bool = True, force_refresh: 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def list_plane_projects() -> str:
     """List only Plane projects explicitly configured for this user."""
+    if REMOTE_MCP_URL:
+        return remote_project_listing(call_remote_tool("list_plane_projects", {}))
     configured = configured_projects("all")
     live = {str(project.get("id")): project for project in fetch_projects()}
     projects = [live[p["id"]] for p in configured if p["id"] in live]
@@ -654,6 +813,18 @@ def list_plane_tasks(
     projects: str = "",
 ) -> str:
     """List Todo/In Progress tasks for configured project key(s). Use a task code directly with get_plane_task when known."""
+    if REMOTE_MCP_URL:
+        result = call_remote_tool("list_plane_tasks", {
+            "assignee": assignee.strip() or DEFAULT_ASSIGNEE,
+            "query": query,
+            "state": state,
+            "priority": priority,
+            "include_closed": include_closed,
+            "limit": limit,
+            "force_refresh": force_refresh,
+            "projects": remote_project_filter(projects),
+        })
+        return remote_text(result)
     available_projects = fetch_projects(force_refresh=force_refresh)
     configured = configured_projects(projects)
     live_projects = {str(project.get("id")): project for project in available_projects}
@@ -695,7 +866,7 @@ def list_plane_tasks(
 
     inaccessible_projects = []
     with ThreadPoolExecutor(max_workers=min(5, max(1, len(selected_projects)))) as executor:
-        futures = {executor.submit(load_project, project): project for project in selected_projects}
+        futures = {submit_with_context(executor, load_project, project): project for project in selected_projects}
         items = []
         for future in as_completed(futures):
             project = futures[future]
@@ -742,24 +913,30 @@ def get_plane_task(task_identifier: str, force_refresh: bool = False) -> list[An
 
     Read inline images directly. If the client exposes only image paths, inspect all images in one parallel tool batch.
     """
+    if REMOTE_MCP_URL:
+        task_identifier, _sequence, _project = project_for_task_identifier(task_identifier)
+        return remote_task_content(call_remote_tool("get_plane_task", {
+            "task_identifier": task_identifier,
+            "force_refresh": force_refresh,
+        }))
     cleanup_old_assets(7)
     item, _states = find_item(task_identifier, force_refresh=force_refresh)
     project_id = str(item["project"])
-    asset_root = ROOT / "tmp" / "plane-mcp"
+    asset_root = ROOT / "tmp" / "plane-mcp" / _token_scope()
     asset_root.mkdir(parents=True, exist_ok=True)
     asset_dir = Path(tempfile.mkdtemp(prefix=f"{task_identifier}-", dir=asset_root))
     renderer = DescriptionRenderer(
         asset_dir=asset_dir,
-        api_token=TOKEN,
+        api_token=get_api_token(),
         base_url=API,
         asset_url_prefix=f"{API}/workspaces/{WORKSPACE}/projects/{project_id}/work-items/{item['id']}/attachments",
     )
     with ThreadPoolExecutor(max_workers=5) as executor:
-        members_future = executor.submit(fetch_members, force_refresh=force_refresh)
-        labels_future = executor.submit(fetch_labels, project_id, force_refresh=force_refresh)
-        links_future = executor.submit(fetch_links, project_id, item["id"], force_refresh=force_refresh)
-        comments_future = executor.submit(fetch_comments, project_id, item["id"], force_refresh=force_refresh)
-        attachments_future = executor.submit(fetch_attachments, project_id, item["id"], force_refresh=force_refresh)
+        members_future = submit_with_context(executor, fetch_members, force_refresh=force_refresh)
+        labels_future = submit_with_context(executor, fetch_labels, project_id, force_refresh=force_refresh)
+        links_future = submit_with_context(executor, fetch_links, project_id, item["id"], force_refresh=force_refresh)
+        comments_future = submit_with_context(executor, fetch_comments, project_id, item["id"], force_refresh=force_refresh)
+        attachments_future = submit_with_context(executor, fetch_attachments, project_id, item["id"], force_refresh=force_refresh)
         renderer.feed(item.get("description_html") or "")
         rendered = renderer.render().strip() or "(trống)"
         members = members_future.result()
@@ -810,7 +987,7 @@ def get_plane_task(task_identifier: str, force_refresh: bool = False) -> list[An
                 nonlocal image_number
                 image_number += 1
                 image_renderer = DescriptionRenderer(
-                    asset_dir, TOKEN, API,
+                    asset_dir, get_api_token(), API,
                     f"{API}/workspaces/{WORKSPACE}/projects/{project_id}/work-items/{item['id']}/attachments",
                     filename_prefix=f"comment-{comment_index}-{image_number}",
                 )
@@ -843,7 +1020,7 @@ def get_plane_task(task_identifier: str, force_refresh: bool = False) -> list[An
         if (renderer.parts[part_index] or "").startswith("\n![")
     }
     attachment_renderer = DescriptionRenderer(
-        asset_dir, TOKEN, API,
+        asset_dir, get_api_token(), API,
         f"{API}/workspaces/{WORKSPACE}/projects/{project_id}/work-items/{item['id']}/attachments",
     )
     for attachment_index, attachment in enumerate(attachments, 1):
@@ -878,7 +1055,7 @@ def render_html_cli() -> int:
         "PLANE_ASSET_URL_PREFIX",
         f"{API}/workspaces/{WORKSPACE}/work-items/attachments",
     )
-    renderer = DescriptionRenderer(asset_dir, TOKEN, API, asset_url_prefix)
+    renderer = DescriptionRenderer(asset_dir, get_api_token(), API, asset_url_prefix)
     renderer.feed(sys.stdin.read())
     print(renderer.render())
     return 0
@@ -896,4 +1073,7 @@ if __name__ == "__main__":
         raise SystemExit(render_html_cli())
     if len(sys.argv) > 1 and sys.argv[1] == "--print-shell-config":
         raise SystemExit(print_shell_config_cli())
-    mcp.run()
+    if HTTP_MODE:
+        run_http_server()
+    else:
+        mcp.run()

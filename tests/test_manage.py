@@ -59,7 +59,7 @@ class SetupTests(unittest.TestCase):
                 set_password=lambda *_args: None,
             )
             with patch.object(manage, "CONFIG_PATH", config_path), \
-                 patch.object(manage, "load_config", return_value={}), \
+                 patch.object(manage, "load_config", return_value={"remote_mcp_url": "https://mcp.example.com/mcp"}), \
                  patch.object(manage, "fetch_project_metadata", return_value=project) as fetch, \
                  patch.object(manage, "input", create=True, side_effect=["Dev Name", project_id, "", ""]), \
                  patch.object(manage.getpass, "getpass", return_value="secret-token"), \
@@ -72,8 +72,21 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(config["workspace_slug"], "apetechs")
             self.assertEqual(config["display_name"], "Dev Name")
             self.assertEqual(config["projects"], {"ntss": project})
+            self.assertEqual(config["remote_mcp_url"], "https://mcp.example.com/mcp")
             self.assertNotIn("secret-token", config_path.read_text())
             fetch.assert_called_once_with("secret-token", project_id)
+
+    def test_remote_url_requires_https_and_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text('{"projects": {"demo": {}}}')
+            with patch.object(manage, "CONFIG_PATH", config_path):
+                with self.assertRaises(SystemExit):
+                    manage.set_remote_url("http://mcp.example.com/mcp")
+                manage.set_remote_url("https://mcp.example.com/mcp")
+                self.assertEqual(json.loads(config_path.read_text())["remote_mcp_url"], "https://mcp.example.com/mcp")
+                manage.set_remote_url("off")
+                self.assertNotIn("remote_mcp_url", json.loads(config_path.read_text()))
 
 
 if __name__ == "__main__":

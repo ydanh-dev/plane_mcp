@@ -1,6 +1,6 @@
 # Plane MCP
 
-Local, user-wide MCP server for Plane. One installation can serve multiple configured Plane projects and multiple MCP clients, including Codex CLI/Desktop and Antigravity. The MCP process runs on the user's computer; this project does not require a hosted application server.
+User-wide MCP server for Plane. It runs locally by default and can optionally use a Cloud Run backend, while one installation serves multiple configured Plane projects and clients including Codex CLI/Desktop and Antigravity.
 
 > **Security:** the repository contains no Plane token or per-user project configuration. Setup stores the token in the operating system credential store: macOS Keychain, Windows Credential Manager, or Linux Secret Service. Each user maintains their own project allowlist and display name in `~/.config/plane-mcp/config.json`.
 
@@ -109,6 +109,14 @@ On Windows, use the `.venv\\Scripts\\python.exe` path and escape backslashes in 
 
 The MCP reads project IDs from the user's config, not from the current repository/workspace. Workspace instructions should tell the assistant which project key to use for list requests.
 
+### Optional Cloud Run backend
+
+`Dockerfile` runs the same MCP over Streamable HTTP at `/mcp`. Set `PLANE_MCP_HTTP=1` and provide `PLANE_MCP_CONFIG_JSON` with the Plane URL, workspace, and server project allowlist only. Do not put a Plane token in the image or Cloud Run environment.
+
+After deployment, run `plane-mcp remote https://YOUR-SERVICE.run.app/mcp` and reload Codex or Antigravity. The local MCP process is a small bridge: it reads each user's token from the OS credential store and sends it over HTTPS to the configured service; the service forwards it to the configured Plane host for that request and does not save it. Use only a Cloud Run service you control and trust. Run `plane-mcp remote off` to return to local Plane API calls.
+
+Cloud Run requires an active billing account. Its free tier is usage-based, not a spending cap, so usage beyond the free quota can cost money.
+
 ### Updates
 
 Run this when you want to check for a release:
@@ -126,6 +134,8 @@ Other commands:
 ```sh
 plane-mcp status
 plane-mcp setup
+plane-mcp remote https://YOUR-SERVICE.run.app/mcp
+plane-mcp remote off
 ```
 
 ### Troubleshooting
@@ -147,9 +157,9 @@ PLANE_MCP_CONFIG=/path/to/test-config.json PLANE_API_TOKEN=test-token .venv/bin/
 
 ### Privacy and limitations
 
-- Plane API credentials are sent only to the configured Plane API host. The token is stored in the OS credential manager and is not written to the JSON config.
+- In local mode, Plane credentials are sent directly to the configured Plane API host. In Cloud Run mode, the token also passes through the configured HTTPS MCP service in memory; it remains in the OS credential store locally and is not written to JSON or persisted by this MCP.
 - Project allowlisting is enforced by the MCP before reading task details or listing work items. Plane permissions remain the underlying access boundary.
-- GitHub is used to download source and check release tags. No application server is operated by this project.
+- GitHub is used to download source and check release tags. Cloud hosting is optional and must be deployed and paid for by the operator.
 - Updating is a terminal workflow. MCP clients do not share a common update-confirmation dialog, so this release does not display a clickable update modal inside Codex or Antigravity.
 - Linux setup needs a logged-in desktop session with a working Secret Service provider. Headless Linux without that service is not supported by the secure setup flow.
 - **License:** not yet specified. Public visibility does not itself grant permission to redistribute or modify this software; the maintainer must add a license before granting those rights.
@@ -158,7 +168,7 @@ PLANE_MCP_CONFIG=/path/to/test-config.json PLANE_API_TOKEN=test-token .venv/bin/
 
 ### Giới thiệu
 
-Plane MCP là MCP chạy cục bộ, dùng chung ở cấp user. Một lần cài đặt có thể dùng với nhiều project Plane và nhiều MCP client như Codex CLI/Desktop và Antigravity. MCP chạy trên máy của user; dự án này không cần thuê server ứng dụng để chạy liên tục.
+Plane MCP dùng chung ở cấp user và mặc định chạy cục bộ. Có thể chuyển phần xử lý Plane sang Cloud Run; một lần cài đặt vẫn dùng được với nhiều project Plane và MCP client như Codex CLI/Desktop, Antigravity.
 
 > **Bảo mật:** repo không chứa Plane token hay cấu hình project cá nhân. Wizard lưu token vào kho credential của hệ điều hành: Keychain trên macOS, Credential Manager trên Windows, hoặc Secret Service trên Linux. Mỗi user có allowlist project và display name riêng trong `~/.config/plane-mcp/config.json`.
 
@@ -263,6 +273,14 @@ Trên Windows, dùng đường dẫn `.venv\\Scripts\\python.exe` và escape d�
 
 Project ID được đọc từ config của user, không phải từ repo/workspace hiện tại. Hướng dẫn workspace nên nói rõ project key cần dùng khi liệt kê task.
 
+### Cloud Run tùy chọn
+
+`Dockerfile` chạy cùng MCP bằng Streamable HTTP tại `/mcp`. Cấu hình `PLANE_MCP_HTTP=1` và biến `PLANE_MCP_CONFIG_JSON`, chỉ chứa URL Plane, workspace và allowlist project của server. Không đưa Plane token vào image hoặc biến môi trường Cloud Run.
+
+Sau khi deploy, chạy `plane-mcp remote https://YOUR-SERVICE.run.app/mcp`, rồi reload Codex hoặc Antigravity. MCP local chỉ làm cầu nối nhẹ: đọc token của từng user từ credential store của OS và gửi qua HTTPS tới service đã cấu hình; service dùng token đó để gọi Plane rồi không lưu lại. Chỉ dùng Cloud Run service mà bạn quản lý và tin cậy. Chạy `plane-mcp remote off` để quay về gọi Plane trực tiếp từ máy.
+
+Cloud Run yêu cầu project có billing account hoạt động. Free tier tính theo mức sử dụng, không phải giới hạn chi tiêu; dùng vượt quota miễn phí có thể phát sinh phí.
+
 ### Cập nhật
 
 Khi muốn kiểm tra có bản mới, chạy:
@@ -280,6 +298,8 @@ Các lệnh khác:
 ```sh
 plane-mcp status
 plane-mcp setup
+plane-mcp remote https://YOUR-SERVICE.run.app/mcp
+plane-mcp remote off
 ```
 
 ### Khắc phục sự cố
@@ -301,9 +321,9 @@ PLANE_MCP_CONFIG=/path/to/test-config.json PLANE_API_TOKEN=test-token .venv/bin/
 
 ### Riêng tư và giới hạn
 
-- Plane API credential chỉ được gửi tới Plane API host đã cấu hình. Token lưu trong credential manager của hệ điều hành và không ghi vào JSON config.
+- Ở chế độ local, Plane token được gửi thẳng tới Plane API host đã cấu hình. Ở chế độ Cloud Run, token cũng đi qua MCP service HTTPS đã cấu hình trong bộ nhớ; token vẫn nằm trong credential store của OS và không được ghi vào JSON hay lưu lại bởi MCP.
 - MCP kiểm tra allowlist trước khi đọc task hoặc liệt kê work items. Quyền Plane của token vẫn là lớp giới hạn truy cập bên dưới.
-- GitHub được dùng để tải source và kiểm tra version tags. Dự án không vận hành application server.
+- GitHub được dùng để tải source và kiểm tra version tags. Cloud hosting là tùy chọn; operator tự deploy và chịu chi phí nếu có.
 - Cập nhật chạy qua terminal. MCP clients không có hộp thoại xác nhận cập nhật chung, nên bản này không hiện modal có nút bấm ngay trong Codex hay Antigravity.
 - Linux cần phiên desktop đăng nhập và Secret Service provider hoạt động. Linux headless không có dịch vụ này chưa được hỗ trợ trong luồng setup an toàn.
 - **Giấy phép:** chưa được chỉ định. Repo công khai không tự cấp quyền phân phối lại hay chỉnh sửa phần mềm; maintainer cần thêm license trước khi cấp các quyền đó.

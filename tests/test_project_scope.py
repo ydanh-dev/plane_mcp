@@ -5,7 +5,15 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+import anyio
+import httpx
+from starlette.applications import Starlette
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -27,12 +35,83 @@ with patch.dict(os.environ, {"PLANE_MCP_CONFIG": str(CONFIG_PATH), "PLANE_API_TO
 
 
 class ProjectScopeTests(unittest.TestCase):
+    def test_remote_request_token_is_required_and_isolated(self):
+        async def token_endpoint(_request):
+            return PlainTextResponse(plane_mcp.get_api_token())
+
+        app = Starlette(routes=[Route("/mcp", token_endpoint, methods=["POST"]), Route("/healthz", lambda _request: PlainTextResponse("ok"))])
+        app.add_middleware(plane_mcp.PlaneBearerMiddleware)
+        async def exercise_requests():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                return (
+                    await client.get("/healthz"),
+                    await client.post("/mcp"),
+                    await client.post("/mcp", headers={"Authorization": "Bearer token-a"}),
+                    await client.post("/mcp", headers={"Authorization": "Bearer token-b"}),
+                )
+
+        health, missing_auth, token_a, token_b = anyio.run(exercise_requests)
+        self.assertEqual(health.text, "ok")
+        self.assertEqual(missing_auth.status_code, 401)
+        self.assertEqual(token_a.text, "token-a")
+        self.assertEqual(token_b.text, "token-b")
+        self.assertEqual(plane_mcp.get_api_token(), "test-token")
+
+    def test_remote_tokens_do_not_share_cache_or_worker_context(self):
+        token_a = plane_mcp._request_api_token.set("token-a")
+        try:
+            plane_mcp.set_cached("same-key", "user-a")
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                self.assertEqual(plane_mcp.submit_with_context(executor, plane_mcp.get_api_token).result(), "token-a")
+        finally:
+            plane_mcp._request_api_token.reset(token_a)
+
+        token_b = plane_mcp._request_api_token.set("token-b")
+        try:
+            self.assertIsNone(plane_mcp.get_cached("same-key"))
+            plane_mcp.set_cached("same-key", "user-b")
+        finally:
+            plane_mcp._request_api_token.reset(token_b)
+
+        token_a = plane_mcp._request_api_token.set("token-a")
+        try:
+            self.assertEqual(plane_mcp.get_cached("same-key"), "user-a")
+        finally:
+            plane_mcp._request_api_token.reset(token_a)
+
+    def test_plane_api_uses_the_remote_callers_token(self):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"ok": true}'
+        token = plane_mcp._request_api_token.set("remote-token")
+        try:
+            with patch.object(plane_mcp.urllib.request, "urlopen", return_value=response) as urlopen:
+                self.assertEqual(plane_mcp.api_get("health/"), {"ok": True})
+            request = urlopen.call_args.args[0]
+            self.assertEqual(request.get_header("X-api-key"), "remote-token")
+        finally:
+            plane_mcp._request_api_token.reset(token)
+
     def test_default_and_explicit_project_selection_are_allowlisted(self):
         self.assertEqual([p["key"] for p in plane_mcp.configured_projects()], ["alpha"])
         self.assertEqual([p["key"] for p in plane_mcp.configured_projects("beta")], ["beta"])
         self.assertEqual({p["key"] for p in plane_mcp.configured_projects("all")}, {"alpha", "beta"})
         with self.assertRaisesRegex(ValueError, "allowlist"):
             plane_mcp.configured_projects("other")
+
+    def test_remote_project_selection_preserves_each_users_allowlist(self):
+        self.assertEqual(plane_mcp.remote_project_filter(""), "DEMOALPHA")
+        self.assertEqual(plane_mcp.remote_project_filter("beta"), "DEMOBETA")
+        self.assertEqual(set(plane_mcp.remote_project_filter("all").split(",")), {"DEMOALPHA", "DEMOBETA"})
+        result = SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text="Plane projects\n\nDEMOALPHA | Demo Alpha | id-a\nDEMOBETA | Demo Beta | id-b")])
+        with patch.object(plane_mcp, "PLANE_PROJECTS", {"alpha": CONFIG["projects"]["alpha"]}):
+            self.assertEqual(plane_mcp.remote_project_listing(result), "Plane projects\n\nDEMOALPHA | Demo Alpha | id-a")
+
+    def test_remote_task_code_is_checked_against_local_allowlist(self):
+        self.assertEqual(plane_mcp.project_for_task_identifier("demoalpha-759")[0], "DEMOALPHA-759")
+        with self.assertRaisesRegex(ValueError, "not in this user's configured project allowlist"):
+            plane_mcp.project_for_task_identifier("UNKNOWN-759")
 
     def test_task_prefix_routes_to_configured_project(self):
         with patch.object(plane_mcp, "api_get", return_value={

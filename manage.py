@@ -118,6 +118,8 @@ def setup() -> None:
         "display_name": display, "credential_account": account,
         "default_project": default_project, "projects": projects,
     }
+    if previous.get("remote_mcp_url"):
+        config["remote_mcp_url"] = previous["remote_mcp_url"]
     save_config(config)
     print(f"\nSaved config: {CONFIG_PATH}\nPlane token saved to the OS credential store (service: plane-mcp).")
     print("\nRegister one MCP server in Codex CLI/Desktop:")
@@ -171,9 +173,28 @@ def update() -> None:
     print(f"Updated to {latest}. Restart the MCP host to load it.")
 
 
+def set_remote_url(value: str) -> None:
+    config = load_config()
+    if not config.get("projects"):
+        raise SystemExit("Run `plane-mcp setup` before configuring a remote server")
+    if value.strip().lower() in {"off", "local"}:
+        config.pop("remote_mcp_url", None)
+        save_config(config)
+        print("Plane MCP now calls Plane directly from this machine.")
+        return
+    parsed = urllib.parse.urlparse(value.strip())
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise SystemExit("Remote MCP URL must be an HTTPS URL ending in /mcp")
+    if not parsed.path.rstrip("/").endswith("/mcp"):
+        raise SystemExit("Remote MCP URL must end in /mcp")
+    config["remote_mcp_url"] = value.strip().rstrip("/")
+    save_config(config)
+    print("Remote Plane MCP URL saved. The Plane token remains in the OS credential store.")
+
+
 def main() -> None:
     if len(sys.argv) < 2 or sys.argv[1] in {"-h", "--help"}:
-        print("Usage: plane-mcp {setup|update|status}")
+        print("Usage: plane-mcp {setup|update|status|remote <https-url|off>}")
         return
     if sys.argv[1] == "setup":
         setup()
@@ -182,6 +203,8 @@ def main() -> None:
     elif sys.argv[1] == "status":
         config = load_config()
         print(f"Install: {ROOT}\nVersion: {subprocess.run(['git', '-C', str(ROOT), 'describe', '--tags', '--exact-match', 'HEAD'], text=True, capture_output=True).stdout.strip() or 'development'}\nConfig: {CONFIG_PATH}\nProjects: {', '.join(config.get('projects', {}).keys())}")
+    elif sys.argv[1] == "remote" and len(sys.argv) == 3:
+        set_remote_url(sys.argv[2])
     else:
         raise SystemExit(f"Unknown command: {sys.argv[1]}")
 
