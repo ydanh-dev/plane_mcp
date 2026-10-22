@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "plane-mcp",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "limits": { "cpu_ms": 10 },
+  "vars": {
+    "PLANE_BASE_URL": "https://plane.apetechs.co/api/v1",
+    "PLANE_WORKSPACE_SLUG": "apetechs",
+    "PLANE_PROJECTS_JSON": "{}",
+    "PLANE_DEFAULT_PROJECT": "",
+    "PLANE_DEFAULT_ASSIGNEE": ""
+  }
+}

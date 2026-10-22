@@ -66,6 +66,26 @@ class ProjectScopeTests(unittest.TestCase):
         finally:
             plane_mcp._request_api_token.reset(token_a)
 
+    def test_remote_tool_results_use_user_scoped_cache_and_force_refresh(self):
+        token = plane_mcp._request_api_token.set("cache-user-token")
+        first = SimpleNamespace(isError=False, content=[])
+        refreshed = SimpleNamespace(isError=False, content=[])
+        try:
+            with patch.object(plane_mcp, "REMOTE_MCP_URL", "https://mcp.example/mcp"), \
+                 patch.object(plane_mcp, "anyio") as anyio_mock:
+                anyio_mock.run.side_effect = [first, refreshed]
+                args = {"assignee": "all", "force_refresh": False}
+                self.assertIs(plane_mcp.call_remote_tool("list_plane_tasks", args), first)
+                self.assertIs(plane_mcp.call_remote_tool("list_plane_tasks", args), first)
+                self.assertEqual(anyio_mock.run.call_count, 1)
+
+                self.assertIs(plane_mcp.call_remote_tool("list_plane_tasks", {**args, "force_refresh": True}), refreshed)
+                self.assertEqual(anyio_mock.run.call_count, 2)
+                self.assertIs(plane_mcp.call_remote_tool("list_plane_tasks", args), refreshed)
+                self.assertEqual(anyio_mock.run.call_count, 2)
+        finally:
+            plane_mcp._request_api_token.reset(token)
+
         token_b = plane_mcp._request_api_token.set("token-b")
         try:
             self.assertIsNone(plane_mcp.get_cached("same-key"))
@@ -107,6 +127,85 @@ class ProjectScopeTests(unittest.TestCase):
         result = SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text="Plane projects\n\nDEMOALPHA | Demo Alpha | id-a\nDEMOBETA | Demo Beta | id-b")])
         with patch.object(plane_mcp, "PLANE_PROJECTS", {"alpha": CONFIG["projects"]["alpha"]}):
             self.assertEqual(plane_mcp.remote_project_listing(result), "Plane projects\n\nDEMOALPHA | Demo Alpha | id-a")
+
+    def test_remote_task_images_are_fetched_only_from_configured_worker(self):
+        project_id = CONFIG["projects"]["alpha"]["id"]
+        uri = (
+            "https://mcp.example/assets?project_id=" + project_id
+            + "&item_id=22222222-2222-4222-8222-222222222222"
+            + "&source=33333333-3333-4333-8333-333333333333&name=image.png&mime_type=image%2Fpng"
+        )
+        result = SimpleNamespace(isError=False, content=[
+            SimpleNamespace(type="text", text="Task details"),
+            SimpleNamespace(type="resource_link", uri=uri, mimeType="image/png"),
+        ])
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.headers = {"Content-Type": "image/png", "Content-Length": "3"}
+        response.read.return_value = b"png"
+        opener = Mock()
+        opener.open.return_value = response
+
+        with patch.object(plane_mcp, "REMOTE_MCP_URL", "https://mcp.example/mcp"), \
+             patch.object(plane_mcp, "PLANE_PROJECTS", {"alpha": CONFIG["projects"]["alpha"]}), \
+             patch.object(plane_mcp, "get_api_token", return_value="user-token"), \
+             patch.object(plane_mcp, "build_opener", return_value=opener):
+            content = plane_mcp.remote_task_content(result)
+
+        self.assertEqual(content[0], "Task details")
+        self.assertEqual(content[1].data, b"png")
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, uri)
+        self.assertEqual(request.get_header("Authorization"), "Bearer user-token")
+
+    def test_remote_task_image_rejects_unconfigured_hosts_and_projects(self):
+        result = SimpleNamespace(isError=False, content=[SimpleNamespace(
+            type="resource_link",
+            uri="https://attacker.example/assets?project_id=11111111-1111-4111-8111-111111111111&item_id=22222222-2222-4222-8222-222222222222&source=33333333-3333-4333-8333-333333333333",
+            mimeType="image/png",
+        )])
+        with patch.object(plane_mcp, "REMOTE_MCP_URL", "https://mcp.example/mcp"), \
+             patch.object(plane_mcp, "PLANE_PROJECTS", {"alpha": CONFIG["projects"]["alpha"]}), \
+             patch.object(plane_mcp, "build_opener") as build_opener:
+            with self.assertRaisesRegex(ValueError, "outside its configured asset endpoint"):
+                plane_mcp.remote_task_content(result)
+        build_opener.assert_not_called()
+
+        result.content[0].uri = result.content[0].uri.replace("attacker.example", "mcp.example")
+        result.content[0].uri = result.content[0].uri.replace("11111111-1111-4111-8111-111111111111", "99999999-9999-4999-8999-999999999999")
+        with patch.object(plane_mcp, "REMOTE_MCP_URL", "https://mcp.example/mcp"), \
+             patch.object(plane_mcp, "PLANE_PROJECTS", {"alpha": CONFIG["projects"]["alpha"]}):
+            with self.assertRaisesRegex(ValueError, "outside this user's configured project allowlist"):
+                plane_mcp.remote_task_content(result)
+
+    def test_remote_non_image_attachments_are_saved_under_a_safe_local_path(self):
+        import re
+
+        uri = (
+            "https://mcp.example/assets?project_id=11111111-1111-4111-8111-111111111111"
+            "&item_id=22222222-2222-4222-8222-222222222222&source=33333333-3333-4333-8333-333333333333"
+        )
+        result = SimpleNamespace(isError=False, content=[SimpleNamespace(
+            type="resource_link", uri=uri, mimeType="application/pdf", name="../../report.pdf",
+        )])
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.headers = {"Content-Type": "application/pdf", "Content-Length": "3"}
+        response.read.return_value = b"pdf"
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(plane_mcp, "REMOTE_MCP_URL", "https://mcp.example/mcp"), \
+             patch.object(plane_mcp, "PLANE_PROJECTS", {"alpha": CONFIG["projects"]["alpha"]}), \
+             patch.object(plane_mcp, "ROOT", Path(directory)), \
+             patch.object(plane_mcp, "get_api_token", return_value="user-token"), \
+             patch.object(plane_mcp, "build_opener", return_value=SimpleNamespace(open=lambda *_args, **_kwargs: response)):
+            content = plane_mcp.remote_task_content(result)
+            match = re.search(r"→ (.+)$", content[0])
+            self.assertIsNotNone(match)
+            path = Path(match.group(1))
+            self.assertEqual(path.read_bytes(), b"pdf")
+            self.assertEqual(path.name, "attachment-1.pdf")
 
     def test_remote_task_code_is_checked_against_local_allowlist(self):
         self.assertEqual(plane_mcp.project_for_task_identifier("demoalpha-759")[0], "DEMOALPHA-759")

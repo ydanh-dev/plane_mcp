@@ -29,7 +29,7 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, unquote_to_bytes, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import anyio
@@ -423,7 +423,19 @@ def call_remote_tool(name: str, arguments: dict[str, Any]) -> Any:
         parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.path.endswith("/mcp")
     ):
         raise RuntimeError("Remote Plane MCP URL must be an HTTPS /mcp URL without embedded credentials or query parameters")
-    return anyio.run(_call_remote_tool, REMOTE_MCP_URL, get_api_token(), name, arguments)
+    token = get_api_token()
+    force_refresh = bool(arguments.get("force_refresh", False))
+    cache_arguments = {key: value for key, value in arguments.items() if key != "force_refresh"}
+    serialized_arguments = json.dumps(cache_arguments, sort_keys=True, separators=(",", ":"))
+    cache_key = f"remote_{name}_{serialized_arguments}"
+    if not force_refresh:
+        cached = get_cached(cache_key)
+        if cached is not None:
+            return cached
+    result = anyio.run(_call_remote_tool, REMOTE_MCP_URL, token, name, arguments)
+    if not getattr(result, "isError", False):
+        set_cached(cache_key, result)
+    return result
 
 
 def remote_text(result: Any) -> str:
@@ -445,6 +457,56 @@ def remote_project_listing(result: Any) -> str:
     return "Plane projects\n\n" + "\n".join(rows)
 
 
+def fetch_remote_asset(block: Any) -> tuple[bytes, str, str]:
+    uri = urlparse(str(getattr(block, "uri", "")))
+    remote = urlparse(REMOTE_MCP_URL)
+    if (uri.scheme, uri.netloc) != (remote.scheme, remote.netloc) or uri.path != "/assets" or uri.fragment or uri.username or uri.password:
+        raise ValueError("Remote MCP returned an image URL outside its configured asset endpoint")
+    query = parse_qs(uri.query, keep_blank_values=True, strict_parsing=True)
+    if set(query) - {"project_id", "item_id", "source", "name", "mime_type"} or any(len(values) != 1 for values in query.values()):
+        raise ValueError("Remote MCP returned an invalid image URL")
+    project_id = query.get("project_id", [""])[0]
+    if project_id.lower() not in {project.get("id", "").lower() for project in PLANE_PROJECTS.values()}:
+        raise ValueError("Remote MCP image is outside this user's configured project allowlist")
+    try:
+        UUID(query.get("item_id", [""])[0])
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError("Remote MCP returned an invalid task image URL") from error
+    if not query.get("source", [""])[0] or len(query["source"][0]) > 4096:
+        raise ValueError("Remote MCP returned an invalid task image source")
+
+    class NoRedirectHandler(HTTPRedirectHandler):
+        def redirect_request(self, request, *args, **kwargs):  # type: ignore[no-untyped-def]
+            return None
+
+    request = Request(uri.geturl(), headers={"Authorization": f"Bearer {get_api_token()}", "Accept": "*/*"})
+    with build_opener(NoRedirectHandler()).open(request, timeout=20) as response:
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        if not content_type or "/" not in content_type:
+            raise ValueError("Remote MCP attachment has no valid content type")
+        max_bytes = MAX_IMAGE_BYTES if content_type.startswith("image/") else MAX_ATTACHMENT_BYTES
+        length = response.headers.get("Content-Length")
+        if length and int(length) > max_bytes:
+            raise ValueError(f"Remote MCP attachment exceeds {max_bytes // (1024 * 1024)} MiB")
+        data = response.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError(f"Remote MCP attachment exceeds {max_bytes // (1024 * 1024)} MiB")
+    return data, content_type, str(getattr(block, "name", "attachment"))
+
+
+def remote_task_attachment(block: Any, index: int) -> Any:
+    data, content_type, name = fetch_remote_asset(block)
+    if content_type in {"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}:
+        return Image(data=data, format=content_type.split("/", 1)[1])
+    asset_root = ROOT / "tmp" / "plane-mcp"
+    asset_root.mkdir(parents=True, exist_ok=True)
+    asset_dir = Path(tempfile.mkdtemp(prefix=f"{_token_scope()}-remote-", dir=asset_root))
+    suffix = mimetypes.guess_extension(content_type) or ".bin"
+    output = asset_dir / f"attachment-{index}{suffix}"
+    output.write_bytes(data)
+    return f"Attachment downloaded: {name} ({content_type}) → {output.resolve()}"
+
+
 def remote_task_content(result: Any) -> list[Any]:
     content: list[Any] = []
     texts = [block.text for block in result.content if getattr(block, "type", None) == "text"]
@@ -452,11 +514,25 @@ def remote_task_content(result: Any) -> list[Any]:
         raise RuntimeError("\n".join(texts) or "Remote Plane MCP request failed")
     if texts:
         content.append("\n".join(texts))
+    asset_blocks = []
     for block in result.content:
-        if getattr(block, "type", None) != "image" or not block.mimeType.startswith("image/"):
-            continue
-        format = block.mimeType.split("/", 1)[1]
-        content.append(Image(data=base64.b64decode(block.data, validate=True), format=format))
+        block_type = getattr(block, "type", None)
+        if block_type == "image" and block.mimeType.startswith("image/"):
+            format = block.mimeType.split("/", 1)[1]
+            content.append(Image(data=base64.b64decode(block.data, validate=True), format=format))
+        elif block_type == "resource_link":
+            asset_blocks.append(block)
+    if asset_blocks:
+        cleanup_old_assets(7)
+        notes = []
+        with ThreadPoolExecutor(max_workers=min(5, len(asset_blocks))) as executor:
+            for asset in executor.map(remote_task_attachment, asset_blocks, range(1, len(asset_blocks) + 1)):
+                if isinstance(asset, Image):
+                    content.append(asset)
+                else:
+                    notes.append(asset)
+        if notes:
+            content.append("\n".join(notes))
     return content
 
 

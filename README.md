@@ -1,6 +1,6 @@
 # Plane MCP
 
-User-wide MCP server for Plane. It runs locally by default and can optionally use a Cloud Run backend, while one installation serves multiple configured Plane projects and clients including Codex CLI/Desktop and Antigravity.
+User-wide MCP server for Plane. It runs locally by default and can optionally use a Cloud Run backend; a Cloudflare Workers backend prototype is also included. One installation serves multiple configured Plane projects and clients including Codex CLI/Desktop and Antigravity.
 
 > **Security:** the repository contains no Plane token or per-user project configuration. Setup stores the token in the operating system credential store: macOS Keychain, Windows Credential Manager, or Linux Secret Service. Each user maintains their own project allowlist and display name in `~/.config/plane-mcp/config.json`.
 
@@ -117,6 +117,16 @@ After deployment, run `plane-mcp remote https://YOUR-SERVICE.run.app/mcp` and re
 
 Cloud Run requires an active billing account. Its free tier is usage-based, not a spending cap, so usage beyond the free quota can cost money.
 
+### Experimental Cloudflare Workers backend
+
+`cloudflare/worker` contains a stateless Worker prototype for the same MCP tools and attachment flow. It has been tested locally with fake Plane responses; it has **not** been deployed or benchmarked against the company Plane instance.
+
+To try it, install Node.js 20+, then from `cloudflare/worker` run `npm ci` and `npm test`. Before deploying, edit `wrangler.jsonc` and set `PLANE_PROJECTS_JSON` to the union of projects the service may expose, for example `{"np":{"id":"PROJECT-UUID","identifier":"NP"}}`; set `PLANE_DEFAULT_PROJECT` to a key in that object. These are project IDs and identifiers only—never put a Plane token there. Then run `npx wrangler login`, `npx wrangler deploy`, and on each local client run `plane-mcp remote https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/mcp`.
+
+The local bridge still reads each user's Plane token from the OS credential store and sends it to the configured Worker over HTTPS for each uncached call. The Worker forwards it to Plane in memory and does not store it. Only deploy to an account you control and trust. The local bridge caches successful tool responses for 60 seconds per token; `force_refresh=true` bypasses that cache.
+
+Cloudflare advertises a Free plan with no card required, 100,000 requests/day, and a 10 ms CPU limit per request ([official limits](https://developers.cloudflare.com/workers/platform/limits/), [Workers overview](https://www.cloudflare.com/products/workers/)). The CPU cap is the main risk: large task lists or image-heavy details may exceed it. Inline images over 128 KiB are currently skipped; benchmark before asking other users to switch.
+
 ### Updates
 
 Run this when you want to check for a release:
@@ -153,13 +163,14 @@ plane-mcp remote off
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 PLANE_MCP_CONFIG=/path/to/test-config.json PLANE_API_TOKEN=test-token .venv/bin/python -m unittest discover -s tests -v
+cd cloudflare/worker && npm ci && npm test && npx wrangler deploy --dry-run
 ```
 
 ### Privacy and limitations
 
-- In local mode, Plane credentials are sent directly to the configured Plane API host. In Cloud Run mode, the token also passes through the configured HTTPS MCP service in memory; it remains in the OS credential store locally and is not written to JSON or persisted by this MCP.
+- In local mode, Plane credentials are sent directly to the configured Plane API host. In Cloud Run or Cloudflare Worker mode, the token also passes through the configured HTTPS MCP service in memory; it remains in the OS credential store locally and is not written to JSON or persisted by this MCP.
 - Project allowlisting is enforced by the MCP before reading task details or listing work items. Plane permissions remain the underlying access boundary.
-- GitHub is used to download source and check release tags. Cloud hosting is optional and must be deployed and paid for by the operator.
+- GitHub is used to download source and check release tags. Cloud hosting is optional; the Cloudflare Worker is only a local-tested prototype and the operator controls any deployment.
 - Updating is a terminal workflow. MCP clients do not share a common update-confirmation dialog, so this release does not display a clickable update modal inside Codex or Antigravity.
 - Linux setup needs a logged-in desktop session with a working Secret Service provider. Headless Linux without that service is not supported by the secure setup flow.
 - **License:** not yet specified. Public visibility does not itself grant permission to redistribute or modify this software; the maintainer must add a license before granting those rights.
@@ -168,7 +179,7 @@ PLANE_MCP_CONFIG=/path/to/test-config.json PLANE_API_TOKEN=test-token .venv/bin/
 
 ### Giới thiệu
 
-Plane MCP dùng chung ở cấp user và mặc định chạy cục bộ. Có thể chuyển phần xử lý Plane sang Cloud Run; một lần cài đặt vẫn dùng được với nhiều project Plane và MCP client như Codex CLI/Desktop, Antigravity.
+Plane MCP dùng chung ở cấp user và mặc định chạy cục bộ. Có thể chuyển phần xử lý Plane sang Cloud Run; repo cũng có prototype backend Cloudflare Workers. Một lần cài đặt vẫn dùng được với nhiều project Plane và MCP client như Codex CLI/Desktop, Antigravity.
 
 > **Bảo mật:** repo không chứa Plane token hay cấu hình project cá nhân. Wizard lưu token vào kho credential của hệ điều hành: Keychain trên macOS, Credential Manager trên Windows, hoặc Secret Service trên Linux. Mỗi user có allowlist project và display name riêng trong `~/.config/plane-mcp/config.json`.
 
@@ -281,6 +292,16 @@ Sau khi deploy, chạy `plane-mcp remote https://YOUR-SERVICE.run.app/mcp`, rồ
 
 Cloud Run yêu cầu project có billing account hoạt động. Free tier tính theo mức sử dụng, không phải giới hạn chi tiêu; dùng vượt quota miễn phí có thể phát sinh phí.
 
+### Prototype backend Cloudflare Workers
+
+`cloudflare/worker` có prototype Worker stateless chạy cùng MCP tools và luồng tải attachment. Đã test local bằng dữ liệu Plane giả lập; **chưa deploy** và chưa benchmark với Plane công ty.
+
+Muốn thử, cài Node.js 20+, vào `cloudflare/worker`, chạy `npm ci` và `npm test`. Trước khi deploy, sửa `wrangler.jsonc`: đặt `PLANE_PROJECTS_JSON` thành danh sách các project server được phép truy cập, ví dụ `{"np":{"id":"PROJECT-UUID","identifier":"NP"}}`; đặt `PLANE_DEFAULT_PROJECT` bằng một key trong danh sách. Chỉ điền project ID/identifier, tuyệt đối không đưa Plane token vào đây. Sau đó chạy `npx wrangler login`, `npx wrangler deploy`; trên mỗi máy local chạy `plane-mcp remote https://TEN-WORKER.TEN-SUBDOMAIN.workers.dev/mcp`.
+
+Local bridge vẫn lấy token của từng user từ credential store hệ điều hành và gửi qua HTTPS tới Worker cho mỗi lần gọi chưa có cache. Worker chuyển tiếp token tới Plane trong bộ nhớ rồi không lưu lại. Chỉ deploy lên tài khoản bạn quản lý và tin cậy. Local bridge cache kết quả tool thành công trong 60 giây theo từng token; `force_refresh=true` bỏ qua cache.
+
+Cloudflare quảng bá Workers Free không cần thẻ, tối đa 100.000 request/ngày và giới hạn CPU 10 ms cho mỗi request ([giới hạn chính thức](https://developers.cloudflare.com/workers/platform/limits/), [Workers](https://www.cloudflare.com/products/workers/)). Rủi ro chính là giới hạn CPU: danh sách task lớn hoặc task có nhiều ảnh có thể vượt ngưỡng. Ảnh inline lớn hơn 128 KiB hiện bị bỏ qua; hãy benchmark trước khi chuyển user khác sang dùng.
+
 ### Cập nhật
 
 Khi muốn kiểm tra có bản mới, chạy:
@@ -317,13 +338,14 @@ plane-mcp remote off
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 PLANE_MCP_CONFIG=/path/to/test-config.json PLANE_API_TOKEN=test-token .venv/bin/python -m unittest discover -s tests -v
+cd cloudflare/worker && npm ci && npm test && npx wrangler deploy --dry-run
 ```
 
 ### Riêng tư và giới hạn
 
-- Ở chế độ local, Plane token được gửi thẳng tới Plane API host đã cấu hình. Ở chế độ Cloud Run, token cũng đi qua MCP service HTTPS đã cấu hình trong bộ nhớ; token vẫn nằm trong credential store của OS và không được ghi vào JSON hay lưu lại bởi MCP.
+- Ở chế độ local, Plane token được gửi thẳng tới Plane API host đã cấu hình. Ở chế độ Cloud Run hoặc Cloudflare Worker, token cũng đi qua MCP service HTTPS đã cấu hình trong bộ nhớ; token vẫn nằm trong credential store của OS và không được ghi vào JSON hay lưu lại bởi MCP.
 - MCP kiểm tra allowlist trước khi đọc task hoặc liệt kê work items. Quyền Plane của token vẫn là lớp giới hạn truy cập bên dưới.
-- GitHub được dùng để tải source và kiểm tra version tags. Cloud hosting là tùy chọn; operator tự deploy và chịu chi phí nếu có.
+- GitHub được dùng để tải source và kiểm tra version tags. Cloud hosting là tùy chọn; Cloudflare Worker hiện chỉ là prototype đã test local, operator tự quản lý việc deploy.
 - Cập nhật chạy qua terminal. MCP clients không có hộp thoại xác nhận cập nhật chung, nên bản này không hiện modal có nút bấm ngay trong Codex hay Antigravity.
 - Linux cần phiên desktop đăng nhập và Secret Service provider hoạt động. Linux headless không có dịch vụ này chưa được hỗ trợ trong luồng setup an toàn.
 - **Giấy phép:** chưa được chỉ định. Repo công khai không tự cấp quyền phân phối lại hay chỉnh sửa phần mềm; maintainer cần thêm license trước khi cấp các quyền đó.
