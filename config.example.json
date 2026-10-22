@@ -1,7 +1,8 @@
 {
   "base_url": "https://api.plane.so/api/v1",
   "workspace_slug": "your-workspace",
-  "display_name": "Your Plane display name",
+  "default_assignee_id": "00000000-0000-0000-0000-000000000000",
+  "default_assignee": "your-email@example.com",
   "credential_account": "your-user-account",
   "default_project": "demo",
   "projects": {

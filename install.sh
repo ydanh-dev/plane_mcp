@@ -7,7 +7,15 @@ BIN="$HOME/.local/bin"
 
 if [ -e "$DEST/.git" ]; then
   echo "Plane MCP is already installed at $DEST"
-  "$DEST/.venv/bin/python" "$DEST/manage.py" update
+  if [ -t 0 ]; then
+    "$DEST/.venv/bin/python" "$DEST/manage.py" update
+  else
+    if ! ( : </dev/tty ) 2>/dev/null; then
+      echo "Interactive update check requires a terminal." >&2
+      exit 1
+    fi
+    "$DEST/.venv/bin/python" "$DEST/manage.py" update </dev/tty
+  fi
   exit 0
 fi
 if [ -e "$DEST" ]; then

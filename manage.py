@@ -65,24 +65,53 @@ def fetch_project_metadata(token: str, project_id: str) -> dict[str, str]:
     return {"id": project_id, "identifier": identifier, "name": name}
 
 
+def fetch_current_user(token: str) -> dict[str, str]:
+    request = urllib.request.Request(
+        f"{PLANE_BASE_URL}/users/me/", headers={"X-API-Key": token, "Accept": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            user = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise ValueError("Could not identify this Plane API token; check the token and network access") from error
+    if not isinstance(user, dict):
+        raise ValueError("Plane returned invalid user details for this API token")
+    try:
+        user_id = str(UUID(str(user.get("id", ""))))
+    except ValueError as error:
+        raise ValueError("Plane returned invalid user details for this API token") from error
+    display = str(user.get("display_name") or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get("email") or user_id)
+    return {"id": user_id, "display": display, "assignee": str(user.get("email") or display)}
+
+
 def setup() -> None:
     previous = load_config()
     print("Plane MCP setup — user-local config; token is stored in the operating system credential store.\n")
-    display = input(f"Your Plane display name (optional) [{previous.get('display_name', '')}]: ").strip() or str(previous.get("display_name", ""))
 
     token = getpass.getpass("Plane API token (input hidden): ").strip()
     if not token:
         raise SystemExit("Token is required")
+    try:
+        current_user = fetch_current_user(token)
+    except ValueError as error:
+        raise SystemExit(f"{error}.") from error
+    print(f"Detected Plane account: {current_user['display']}")
 
     projects: dict[str, dict[str, str]] = {}
     old_projects = previous.get("projects", {})
     if isinstance(old_projects, dict):
         projects.update(old_projects)
-    print("\nAdd projects by UUID. Project names and task-code prefixes are read from Plane.")
+    print("\nAdd projects by UUID. Plane supplies each project's name and task-code prefix.")
+    if projects:
+        print(f"Keeping {len(projects)} existing project(s).")
     while True:
-        project_id = input("Plane project UUID (press Enter when done / nhấn Enter khi xong): ").strip()
+        prompt = "Plane project UUID (Enter to finish): " if projects else "Plane project UUID: "
+        project_id = input(prompt).strip()
         if not project_id:
-            break
+            if projects:
+                break
+            print("Add at least one project UUID.")
+            continue
         try:
             project_id = str(UUID(project_id))
         except ValueError:
@@ -94,12 +123,14 @@ def setup() -> None:
             print(f"  {error}.")
             continue
         default_key = project["identifier"].lower()
-        key = input(f"  Project key [{default_key}] (optional alias): ").strip() or default_key
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", key):
-            print("  Use letters and numbers, beginning with a letter.")
-            continue
+        key = next((
+            existing_key for existing_key, old in projects.items()
+            if isinstance(old, dict) and str(old.get("id", "")).lower() == project_id
+        ), default_key)
         projects[key] = project
-        print(f"  Added {project['identifier']} — {project['name']} as '{key}'.")
+        print(f"  Added {project['identifier']} — {project['name']}.")
+        if input("Add another project? [y/N]: ").strip().lower() not in {"y", "yes"}:
+            break
     if not projects:
         raise SystemExit("Configure at least one project")
     previous_default = str(previous.get("default_project", ""))
@@ -115,13 +146,14 @@ def setup() -> None:
         raise SystemExit(f"Cannot store token securely with the OS credential store: {error}") from error
     config: dict[str, object] = {
         "base_url": PLANE_BASE_URL, "workspace_slug": PLANE_WORKSPACE_SLUG,
-        "display_name": display, "credential_account": account,
+        "default_assignee_id": current_user["id"], "default_assignee": current_user["assignee"],
+        "credential_account": account,
         "default_project": default_project, "projects": projects,
     }
     if previous.get("remote_mcp_url"):
         config["remote_mcp_url"] = previous["remote_mcp_url"]
     save_config(config)
-    print(f"\nSaved config: {CONFIG_PATH}\nPlane token saved to the OS credential store (service: plane-mcp).")
+    print(f"\nSetup complete. Saved config: {CONFIG_PATH}\nPlane token saved to the OS credential store (service: plane-mcp).")
     print("\nRegister one MCP server in Codex CLI/Desktop:")
     print(f'  codex mcp add plane -- "{python_executable()}" "{ROOT / "plane_mcp.py"}"')
     print("\nFor Antigravity, add the same command and args as one global MCP server in MCP Config.")
@@ -140,24 +172,13 @@ def update() -> None:
     run(["git", "-C", str(ROOT), "fetch", "--tags", "--force", "origin"])
     latest = latest_tag()
     current = subprocess.run(["git", "-C", str(ROOT), "describe", "--tags", "--exact-match", "HEAD"], text=True, capture_output=True).stdout.strip()
-    config = load_config()
     if current == latest:
         print(f"Already using {latest}.")
         return
-    if config.get("skipped_version") == latest:
-        print(f"Version {latest} was skipped. Run `plane-mcp update --force` to review it again.")
-        return
     print(f"Installed: {current or 'development checkout'}\nAvailable: {latest}")
-    if "--force" not in sys.argv:
-        choice = input("[u] Update  [k] Keep current  [s] Skip this version: ").strip().lower()
-        if choice == "s":
-            config["skipped_version"] = latest
-            save_config(config)
-            print(f"Skipped {latest}; it will not be offered again until a newer version is published.")
-            return
-        if choice != "u":
-            print("Kept the installed version.")
-            return
+    if input("Update now? [y/N]: ").strip().lower() not in {"y", "yes"}:
+        print("Kept the installed version. Run `plane-mcp update` to check again later.")
+        return
     old_head = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     changed = run(["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True).stdout.strip()
     if changed:
@@ -168,8 +189,6 @@ def update() -> None:
     except (subprocess.CalledProcessError, OSError):
         subprocess.run(["git", "-C", str(ROOT), "checkout", "--detach", old_head], check=False)
         raise
-    config.pop("skipped_version", None)
-    save_config(config)
     print(f"Updated to {latest}. Restart the MCP host to load it.")
 
 

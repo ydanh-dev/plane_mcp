@@ -50,7 +50,10 @@ PLANE_BASE_URL = os.environ.get("PLANE_BASE_URL", USER_CONFIG.get("base_url", "h
 PLANE_WORKSPACE_SLUG = os.environ.get("PLANE_WORKSPACE_SLUG", USER_CONFIG.get("workspace_slug", "apetechs"))
 PLANE_PROJECTS: dict[str, dict[str, str]] = USER_CONFIG.get("projects", {})
 PLANE_DEFAULT_PROJECT = USER_CONFIG.get("default_project", "")
-PLANE_DEFAULT_ASSIGNEE = os.environ.get("PLANE_DEFAULT_ASSIGNEE", USER_CONFIG.get("display_name", ""))
+PLANE_DEFAULT_ASSIGNEE = os.environ.get(
+    "PLANE_DEFAULT_ASSIGNEE", USER_CONFIG.get("default_assignee", USER_CONFIG.get("display_name", ""))
+)
+PLANE_DEFAULT_ASSIGNEE_ID = str(USER_CONFIG.get("default_assignee_id", ""))
 REMOTE_MCP_URL = str(os.environ.get("PLANE_MCP_REMOTE_URL", USER_CONFIG.get("remote_mcp_url", "")) or "").strip().rstrip("/")
 HTTP_MODE = os.environ.get("PLANE_MCP_HTTP", "").lower() in {"1", "true", "yes"}
 if not isinstance(PLANE_PROJECTS, dict) or not PLANE_PROJECTS:
@@ -794,6 +797,24 @@ def format_assignees(assignee_ids: list[Any], members: list[dict[str, Any]]) -> 
     return ", ".join(formatted)
 
 
+def assignee_filter_ids(members: list[dict[str, Any]], filter_value: str, default_id: str = "") -> set[str] | None:
+    if filter_value.lower() == "all":
+        return None
+    if not filter_value:
+        return {default_id} if default_id else set()
+    matches = set()
+    for member in members:
+        user = member.get("member", member)
+        values = {
+            str(user.get("id", "")).lower(), str(user.get("display_name", "")).lower(),
+            str(user.get("email", "")).lower(),
+            f"{user.get('first_name', '')} {user.get('last_name', '')}".strip().lower(),
+        }
+        if filter_value.lower() in values:
+            matches.add(str(user.get("id", "")))
+    return matches
+
+
 def configured_projects(project_filter: str = "") -> list[dict[str, str]]:
     """Resolve only projects explicitly present in this user's allowlist."""
     requested = project_filter.strip()
@@ -891,7 +912,7 @@ def list_plane_tasks(
     """List Todo/In Progress tasks for configured project key(s). Use a task code directly with get_plane_task when known."""
     if REMOTE_MCP_URL:
         result = call_remote_tool("list_plane_tasks", {
-            "assignee": assignee.strip() or DEFAULT_ASSIGNEE,
+            "assignee": assignee.strip() or DEFAULT_ASSIGNEE or PLANE_DEFAULT_ASSIGNEE_ID,
             "query": query,
             "state": state,
             "priority": priority,
@@ -912,13 +933,11 @@ def list_plane_tasks(
         selected_projects.append({**live, "key": allowed["key"]})
     members = fetch_members(force_refresh=force_refresh)
     assignee_filter = assignee.strip() or DEFAULT_ASSIGNEE
-    member_ids = {
-        str(member.get("id")) for member in members
-        if assignee_filter.lower() in {
-            str(member.get("display_name", "")).lower(), str(member.get("email", "")).lower(),
-            f"{member.get('first_name', '')} {member.get('last_name', '')}".strip().lower(),
-        }
-    } if assignee_filter.lower() != "all" else set()
+    use_detected_id = not assignee.strip() and not os.environ.get("PLANE_DEFAULT_ASSIGNEE")
+    member_ids = assignee_filter_ids(
+        members, "" if use_detected_id and PLANE_DEFAULT_ASSIGNEE_ID else assignee_filter,
+        PLANE_DEFAULT_ASSIGNEE_ID if use_detected_id else "",
+    )
 
     # Keep per-project results isolated while the independent project reads run concurrently.
     def load_project(project: dict[str, Any]) -> list[dict[str, Any]]:
@@ -931,7 +950,7 @@ def list_plane_tasks(
         for item in fetch_items(project_id, force_refresh=force_refresh, fields=fields):
             enriched = enrich(item, states)
             enriched["project_identifier"] = project.get("identifier", "?")
-            if assignee_filter.lower() != "all" and not any(str(value) in member_ids for value in item.get("assignees", [])):
+            if member_ids is not None and not any(str(value) in member_ids for value in item.get("assignees", [])):
                 continue
             if not state and not include_closed and enriched["state_group"] not in {"unstarted", "started"}:
                 continue

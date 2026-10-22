@@ -182,7 +182,7 @@ function assigneeFilterIds(members, filter) {
   if (filter.toLowerCase() === "all") return null;
   return new Set(members.filter((member) => {
     const user = member.member || member;
-    return [user.display_name, user.email, `${user.first_name || ""} ${user.last_name || ""}`.trim()]
+    return [user.id, user.display_name, user.email, `${user.first_name || ""} ${user.last_name || ""}`.trim()]
       .some((name) => String(name || "").toLowerCase() === filter.toLowerCase());
   }).map((member) => String((member.member || member).id)));
 }
@@ -470,7 +470,7 @@ async function listTasks(config, token, args) {
 }
 
 function createServer(config, token, origin) {
-  const server = new McpServer({ name: "Plane", version: "0.2.0" });
+  const server = new McpServer({ name: "Plane", version: "0.2.1" });
   server.registerTool("list_plane_projects", {
     description: "List only Plane projects explicitly configured on this server.",
     inputSchema: {},

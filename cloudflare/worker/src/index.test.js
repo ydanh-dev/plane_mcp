@@ -124,6 +124,23 @@ test("lists task title and state without scanning the workspace project list", a
   assert.equal(paths.some((path) => path.endsWith("/projects/")), false, "only configured project UUID is queried");
 });
 
+test("filters tasks by the authenticated Plane user ID", async () => {
+  const userId = "33333333-3333-4333-8333-333333333333";
+  globalThis.fetch = async (input) => {
+    const url = new URL(input);
+    if (url.pathname.endsWith(`/projects/${projectId}/`)) return Response.json({ id: projectId, identifier: "DEMO", name: "Demo Project" });
+    if (url.pathname.endsWith("/members/")) return Response.json({ results: [{ member: { id: userId, display_name: "Dev Name" } }], next_page_results: false });
+    if (url.pathname.endsWith("/states/")) return Response.json({ results: [{ id: "state-1", name: "Todo", group: "unstarted" }], next_page_results: false });
+    if (url.pathname.endsWith("/work-items/")) return Response.json({
+      results: [{ id: itemId, sequence_id: 759, name: "Assigned to me", state: "state-1", assignees: [userId] }],
+      next_page_results: false,
+    });
+    throw new Error(`Unexpected Plane API route: ${url.pathname}`);
+  };
+  const response = await callTool("list_plane_tasks", { assignee: userId });
+  assert.match(response.result.content[0].text, /DEMO-759 \| Todo \| Assigned to me/);
+});
+
 test("streams only images and never forwards Plane credentials to redirected storage", async () => {
   const config = configFrom(env);
   const sentHeaders = [];

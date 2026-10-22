@@ -2,7 +2,7 @@
 
 User-wide MCP server for Plane. It runs locally by default and can optionally use a Cloud Run backend; a Cloudflare Workers backend prototype is also included. One installation serves multiple configured Plane projects and clients including Codex CLI/Desktop and Antigravity.
 
-> **Security:** the repository contains no Plane token or per-user project configuration. Setup stores the token in the operating system credential store: macOS Keychain, Windows Credential Manager, or Linux Secret Service. Each user maintains their own project allowlist and display name in `~/.config/plane-mcp/config.json`.
+> **Security:** the repository contains no Plane token or per-user project configuration. Setup stores the token in the operating system credential store: macOS Keychain, Windows Credential Manager, or Linux Secret Service. Each user maintains their own project allowlist and detected Plane user ID in `~/.config/plane-mcp/config.json`.
 
 ## English
 
@@ -12,7 +12,7 @@ User-wide MCP server for Plane. It runs locally by default and can optionally us
 - Routes a task detail request by its full Plane code (for example, `DEMOPROJECT-123`). The code prefix must match a project in the local allowlist.
 - Lists tasks for the configured default project, or for explicitly selected project keys/identifiers. `all` means all projects in that user's allowlist.
 - Installs one local server process per user. Codex and Antigravity can point to the same installation; projects are not separate MCP server entries.
-- Provides a terminal update prompt with **Update / Keep / Skip this version**. A skipped release is remembered until a newer version is published.
+- Checks for updates when you run `plane-mcp update` or rerun the installer, then asks whether to update now.
 
 ### Requirements
 
@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 The one-line form executes the downloaded installer directly. Inspect it first if you prefer to review installation scripts before execution.
 
-For manual source review, download [Plane MCP v0.2.0 (.zip)](https://github.com/ydanh-dev/plane_mcp/releases/download/v0.2.0/plane-mcp-v0.2.0.zip).
+For manual source review, download [Plane MCP v0.2.1 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.1.zip).
 
 On Windows, download and inspect `install.ps1`, then run it in PowerShell:
 
@@ -53,7 +53,7 @@ Linux requires an active Secret Service implementation on the desktop session. I
 
 ### First-time setup
 
-This installer is configured for ApeTech's self-hosted Plane (`https://plane.apetechs.co/api/v1`, workspace `apetechs`), so those values are not prompted. Setup asks for your display name (optional), API token, and each project's UUID. It reads the project name and task-code prefix from Plane; a short project key is optional and defaults to that prefix. Press Enter at the UUID prompt when finished. On a fresh setup, the first project becomes the default, so there is no separate default-project prompt.
+This installer is configured for ApeTech's self-hosted Plane (`https://plane.apetechs.co/api/v1`, workspace `apetechs`), so those values are not prompted. Setup asks for your API token and project UUIDs only. It identifies the account through Plane's current-user API, and reads project names and task-code prefixes from Plane. After each UUID, answer whether to add another project; choosing No finishes setup. The first project becomes the default.
 
 The resulting JSON contains configuration only, not the API token. Protect the file because it identifies the projects this installation may access:
 
@@ -62,7 +62,7 @@ The resulting JSON contains configuration only, not the API token. Protect the f
 | User and project settings | `~/.config/plane-mcp/config.json` | File permissions on macOS/Linux; user-profile ACL on Windows |
 | Plane API token | OS credential store, service `plane-mcp` | macOS Keychain, Windows Credential Manager, or Linux Secret Service |
 
-Project keys are optional personal aliases such as `np`, `busan`, or `ntssv2`. The Plane identifier is the prefix in task codes and is read automatically; enter the full project UUID from its Plane URL. Only configured project UUIDs can be read. A task code with an unknown prefix is rejected before an API request.
+Project keys are generated from each Plane identifier, so setup needs no project alias. Enter the full project UUID from its Plane URL. The current Plane user ID is detected automatically and used as the default assignee filter. Only configured project UUIDs can be read. A task code with an unknown prefix is rejected before an API request.
 
 ### Connect Codex CLI / Desktop
 
@@ -115,6 +115,8 @@ The MCP reads project IDs from the user's config, not from the current repositor
 
 `Dockerfile` runs the same MCP over Streamable HTTP at `/mcp`. Set `PLANE_MCP_HTTP=1` and provide `PLANE_MCP_CONFIG_JSON` with the Plane URL, workspace, and server project allowlist only. Do not put a Plane token in the image or Cloud Run environment.
 
+`cloud-run.env.yaml` is an operator-local Cloud Run environment file; the installer does not read it. Its project list is server-wide, not a per-user setup file.
+
 After deployment, run `plane-mcp remote https://YOUR-SERVICE.run.app/mcp` and reload Codex or Antigravity. The local MCP process is a small bridge: it reads each user's token from the OS credential store and sends it over HTTPS to the configured service; the service forwards it to the configured Plane host for that request and does not save it. Use only a Cloud Run service you control and trust. Run `plane-mcp remote off` to return to local Plane API calls.
 
 Cloud Run requires an active billing account. Its free tier is usage-based, not a spending cap, so usage beyond the free quota can cost money.
@@ -137,7 +139,7 @@ Run this when you want to check for a release:
 plane-mcp update
 ```
 
-The updater fetches version tags from GitHub and shows **Update / Keep current / Skip this version**. It installs only after you choose Update, preserves the user config and Keychain token, and returns to the prior code version if dependency installation fails. Skipping a version suppresses that same version; a later release will be offered. Use `plane-mcp update --force` to review a previously skipped release again. Restart the MCP host after updating.
+The updater fetches version tags from GitHub and asks `Update now? [y/N]`. Yes installs the latest release; No keeps the current version and you can check again later. It preserves user config and the OS credential-store token, and returns to the prior code version if dependency installation fails. Restart the MCP host after updating. Updates are checked only when you run this command or rerun the installer; MCP clients do not provide a shared interactive update prompt.
 
 There is no always-on update service and no automatic change to the installed version. To publish an update, the maintainer pushes a semantic version tag (for example, `v0.2.0`). Users choose when to install it.
 
@@ -183,7 +185,7 @@ cd cloudflare/worker && npm ci && npm test && npx wrangler deploy --dry-run
 
 Plane MCP dùng chung ở cấp user và mặc định chạy cục bộ. Có thể chuyển phần xử lý Plane sang Cloud Run; repo cũng có prototype backend Cloudflare Workers. Một lần cài đặt vẫn dùng được với nhiều project Plane và MCP client như Codex CLI/Desktop, Antigravity.
 
-> **Bảo mật:** repo không chứa Plane token hay cấu hình project cá nhân. Wizard lưu token vào kho credential của hệ điều hành: Keychain trên macOS, Credential Manager trên Windows, hoặc Secret Service trên Linux. Mỗi user có allowlist project và display name riêng trong `~/.config/plane-mcp/config.json`.
+> **Bảo mật:** repo không chứa Plane token hay cấu hình project cá nhân. Wizard lưu token vào kho credential của hệ điều hành: Keychain trên macOS, Credential Manager trên Windows, hoặc Secret Service trên Linux. Mỗi user có allowlist project và Plane user ID được nhận diện tự động trong `~/.config/plane-mcp/config.json`.
 
 ### Chức năng
 
@@ -191,7 +193,7 @@ Plane MCP dùng chung ở cấp user và mặc định chạy cục bộ. Có th
 - Tự định tuyến khi đọc task bằng mã đầy đủ, ví dụ `DEMOPROJECT-123`. Prefix phải khớp với một project trong allowlist cục bộ.
 - Mặc định liệt kê task ở project mặc định; có thể chọn project bằng key/identifier. `all` chỉ có nghĩa là tất cả project trong allowlist của user đó.
 - Chạy một MCP local cho mỗi user. Codex và Antigravity cùng trỏ vào một cài đặt; không cần tạo MCP riêng cho từng project.
-- Có updater trên terminal với lựa chọn **Update / Keep / Skip this version**. Bản đã Skip được ghi nhớ tới khi có version mới.
+- Kiểm tra cập nhật khi chạy `plane-mcp update` hoặc chạy lại installer; terminal sẽ hỏi có cập nhật ngay không.
 
 ### Yêu cầu
 
@@ -218,7 +220,7 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 Dạng một dòng thực thi trực tiếp installer vừa tải về. Nếu muốn xem script trước, hãy dùng cách tải file rồi đọc ở trên.
 
-Nếu muốn xem source thủ công, tải [Plane MCP v0.2.0 (.zip)](https://github.com/ydanh-dev/plane_mcp/releases/download/v0.2.0/plane-mcp-v0.2.0.zip).
+Nếu muốn xem source thủ công, tải [Plane MCP v0.2.1 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.1.zip).
 
 Trên Windows, tải và đọc `install.ps1`, sau đó chạy bằng PowerShell:
 
@@ -232,7 +234,7 @@ Linux cần Secret Service đang hoạt động trong phiên desktop. Nếu khô
 
 ### Cấu hình lần đầu
 
-Installer này đã cấu hình sẵn Plane self-host của ApeTech (`https://plane.apetechs.co/api/v1`, workspace `apetechs`), nên không hỏi hai mục đó. Setup hỏi display name (có thể để trống), API token và UUID của từng project. Tên project cùng identifier/prefix task được đọc tự động từ Plane; project key ngắn là tùy chọn và mặc định lấy theo prefix. Nhấn Enter tại câu hỏi UUID khi đã nhập xong. Khi cài mới, project đầu tiên tự động làm project mặc định.
+Installer này đã cấu hình sẵn Plane self-host của ApeTech (`https://plane.apetechs.co/api/v1`, workspace `apetechs`), nên không hỏi hai mục đó. Setup chỉ hỏi API token và UUID project. MCP tự nhận diện tài khoản qua API current-user của Plane, rồi đọc tên project và identifier/prefix task từ Plane. Sau mỗi UUID, chọn có thêm project không; chọn No để kết thúc. Project đầu tiên tự động làm project mặc định.
 
 File JSON chỉ chứa cấu hình, không chứa API token. Hãy bảo vệ file này vì nó xác định các project MCP được phép truy cập:
 
@@ -241,7 +243,7 @@ File JSON chỉ chứa cấu hình, không chứa API token. Hãy bảo vệ fil
 | Cấu hình user và project | `~/.config/plane-mcp/config.json` | Quyền file trên macOS/Linux; ACL user profile trên Windows |
 | Plane API token | Kho credential của OS, service `plane-mcp` | Keychain trên macOS, Credential Manager trên Windows, Secret Service trên Linux |
 
-Project key là bí danh cá nhân tùy chọn, ví dụ `np`, `busan`, `ntssv2`. Plane tự cung cấp identifier/prefix; nhập đầy đủ project UUID trong URL Plane. MCP chỉ đọc các UUID đã khai báo. Mã task có prefix chưa cấu hình sẽ bị từ chối trước khi gọi API.
+Project key được tạo tự động từ identifier của Plane, nên không cần nhập bí danh. Nhập đầy đủ project UUID trong URL Plane. Plane user ID được nhận diện tự động và dùng làm bộ lọc assignee mặc định. MCP chỉ đọc các UUID đã khai báo. Mã task có prefix chưa cấu hình sẽ bị từ chối trước khi gọi API.
 
 ### Kết nối Codex CLI / Desktop
 
@@ -292,6 +294,8 @@ Project ID được đọc từ config của user, không phải từ repo/works
 
 `Dockerfile` chạy cùng MCP bằng Streamable HTTP tại `/mcp`. Cấu hình `PLANE_MCP_HTTP=1` và biến `PLANE_MCP_CONFIG_JSON`, chỉ chứa URL Plane, workspace và allowlist project của server. Không đưa Plane token vào image hoặc biến môi trường Cloud Run.
 
+`cloud-run.env.yaml` chỉ là file môi trường Cloud Run cục bộ của người vận hành; installer không đọc file này. Danh sách project trong đó áp dụng toàn server, không phải cấu hình riêng cho từng user.
+
 Sau khi deploy, chạy `plane-mcp remote https://YOUR-SERVICE.run.app/mcp`, rồi reload Codex hoặc Antigravity. MCP local chỉ làm cầu nối nhẹ: đọc token của từng user từ credential store của OS và gửi qua HTTPS tới service đã cấu hình; service dùng token đó để gọi Plane rồi không lưu lại. Chỉ dùng Cloud Run service mà bạn quản lý và tin cậy. Chạy `plane-mcp remote off` để quay về gọi Plane trực tiếp từ máy.
 
 Cloud Run yêu cầu project có billing account hoạt động. Free tier tính theo mức sử dụng, không phải giới hạn chi tiêu; dùng vượt quota miễn phí có thể phát sinh phí.
@@ -314,7 +318,7 @@ Khi muốn kiểm tra có bản mới, chạy:
 plane-mcp update
 ```
 
-Updater lấy version tags từ GitHub và hỏi **Update / Keep current / Skip this version**. Chỉ khi chọn Update thì mới cài; config và token Keychain được giữ nguyên. Nếu cài dependency lỗi, updater quay lại phiên bản code trước đó. Khi Skip, version đó được ghi nhớ; bản phát hành mới hơn vẫn được thông báo. Chạy `plane-mcp update --force` để xem lại bản đã Skip. Sau khi cập nhật, restart MCP host.
+Updater lấy version tags từ GitHub rồi hỏi `Update now? [y/N]`. Chọn Yes để cài bản mới nhất; No giữ nguyên bản hiện tại và có thể kiểm tra lại lần sau. Config user cùng token trong credential store được giữ nguyên. Nếu cài dependency lỗi, updater quay lại phiên bản code trước đó. Sau khi cập nhật, restart MCP host. Việc kiểm tra chỉ chạy khi gọi lệnh này hoặc chạy lại installer; MCP client không có một hộp thoại cập nhật tương tác dùng chung.
 
 Không có dịch vụ update chạy nền và phiên bản đang cài không tự thay đổi. Để phát hành bản mới, maintainer push một semantic version tag, ví dụ `v0.2.0`. User tự chọn thời điểm cập nhật.
 

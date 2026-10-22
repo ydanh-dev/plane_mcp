@@ -35,6 +35,23 @@ with patch.dict(os.environ, {"PLANE_MCP_CONFIG": str(CONFIG_PATH), "PLANE_API_TO
 
 
 class ProjectScopeTests(unittest.TestCase):
+    def test_default_assignee_uses_the_current_plane_user_id(self):
+        user_id = "33333333-3333-4333-8333-333333333333"
+        members = [{"member": {"id": user_id, "display_name": "Dev Name", "email": "dev@example.com"}}]
+        self.assertEqual(plane_mcp.assignee_filter_ids(members, "", user_id), {user_id})
+        self.assertEqual(plane_mcp.assignee_filter_ids(members, "dev@example.com"), {user_id})
+        self.assertIsNone(plane_mcp.assignee_filter_ids(members, "all"))
+
+    def test_remote_assignee_falls_back_to_detected_user_id(self):
+        result = SimpleNamespace(isError=False, content=[])
+        with patch.object(plane_mcp, "REMOTE_MCP_URL", "https://mcp.example/mcp"), \
+             patch.object(plane_mcp, "DEFAULT_ASSIGNEE", ""), \
+             patch.object(plane_mcp, "PLANE_DEFAULT_ASSIGNEE_ID", "33333333-3333-4333-8333-333333333333"), \
+             patch.object(plane_mcp, "call_remote_tool", return_value=result) as call, \
+             patch.object(plane_mcp, "remote_text", return_value="ok"):
+            self.assertEqual(plane_mcp.list_plane_tasks(), "ok")
+        self.assertEqual(call.call_args.args[1]["assignee"], "33333333-3333-4333-8333-333333333333")
+
     def test_remote_request_token_is_required_and_isolated(self):
         async def token_endpoint(_request):
             return PlainTextResponse(plane_mcp.get_api_token())
