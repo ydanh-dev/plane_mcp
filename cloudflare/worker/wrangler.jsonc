@@ -6,9 +6,6 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "PLANE_BASE_URL": "https://plane.apetechs.co/api/v1",
-    "PLANE_WORKSPACE_SLUG": "apetechs",
-    "PLANE_PROJECTS_JSON": "{}",
-    "PLANE_DEFAULT_PROJECT": "",
-    "PLANE_DEFAULT_ASSIGNEE": ""
+    "PLANE_WORKSPACE_SLUG": "apetechs"
   }
 }

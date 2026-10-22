@@ -886,7 +886,9 @@ def find_item(task_identifier: str, include_closed: bool = True, force_refresh: 
 def list_plane_projects() -> str:
     """List only Plane projects explicitly configured for this user."""
     if REMOTE_MCP_URL:
-        return remote_project_listing(call_remote_tool("list_plane_projects", {}))
+        return remote_project_listing(call_remote_tool("list_plane_projects", {
+            "user_projects": configured_projects("all"),
+        }))
     configured = configured_projects("all")
     live = {str(project.get("id")): project for project in fetch_projects()}
     projects = [live[p["id"]] for p in configured if p["id"] in live]
@@ -920,6 +922,7 @@ def list_plane_tasks(
             "limit": limit,
             "force_refresh": force_refresh,
             "projects": remote_project_filter(projects),
+            "user_projects": configured_projects("all"),
         })
         return remote_text(result)
     available_projects = fetch_projects(force_refresh=force_refresh)
@@ -1013,6 +1016,7 @@ def get_plane_task(task_identifier: str, force_refresh: bool = False) -> list[An
         return remote_task_content(call_remote_tool("get_plane_task", {
             "task_identifier": task_identifier,
             "force_refresh": force_refresh,
+            "user_projects": configured_projects("all"),
         }))
     cleanup_old_assets(7)
     item, _states = find_item(task_identifier, force_refresh=force_refresh)

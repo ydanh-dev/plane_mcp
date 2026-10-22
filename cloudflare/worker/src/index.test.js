@@ -1,34 +1,39 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import worker, { bearerToken, configFrom, fetchPages, safeAssetURL } from "./index.js";
+import worker, { bearerToken, configForUser, configFrom, fetchPages, safeAssetURL } from "./index.js";
 
 const projectId = "11111111-1111-4111-8111-111111111111";
+const userProjectId = "44444444-4444-4444-8444-444444444444";
 const itemId = "22222222-2222-4222-8222-222222222222";
 const env = {
   PLANE_BASE_URL: "https://plane.example/api/v1",
   PLANE_WORKSPACE_SLUG: "test",
-  PLANE_PROJECTS_JSON: JSON.stringify({ demo: { id: projectId, identifier: "DEMO" } }),
-  PLANE_DEFAULT_PROJECT: "demo",
 };
+const userProjects = [{ key: "demo", id: projectId, identifier: "DEMO", name: "Demo Project" }];
 const originalFetch = globalThis.fetch;
 
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 async function callTool(name, args) {
+  const { user_projects = userProjects, ...toolArgs } = args;
   const response = await worker.fetch(new Request("https://mcp.example/mcp", {
     method: "POST",
     headers: { authorization: "Bearer test-token", "content-type": "application/json", accept: "application/json, text/event-stream" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name, arguments: args } }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name, arguments: { ...toolArgs, user_projects } } }),
   }), env);
   const event = (await response.text()).split("\n").find((line) => line.startsWith("data: "));
   assert.ok(event, "MCP response contains an SSE data event");
   return JSON.parse(event.slice(6));
 }
 
-test("validates the configured Plane project allowlist and HTTPS endpoint", () => {
-  assert.equal(configFrom(env).projects.demo.id, projectId);
+test("does not require a Worker-wide project allowlist and validates user projects", () => {
+  assert.equal(configFrom(env).workspace, "test");
+  assert.deepEqual(configForUser(configFrom(env), userProjects).projects.demo, {
+    id: projectId, identifier: "DEMO", name: "Demo Project",
+  });
+  assert.throws(() => configForUser(configFrom(env), []), /Update the local Plane MCP/i);
+  assert.throws(() => configForUser(configFrom(env), [userProjects[0], userProjects[0]]), /duplicate project/i);
   assert.throws(() => configFrom({ ...env, PLANE_BASE_URL: "http://plane.example/api/v1" }), /HTTPS/);
-  assert.throws(() => configFrom({ ...env, PLANE_PROJECTS_JSON: "{}" }), /at least one project/i);
 });
 
 test("accepts only a single bounded bearer token", () => {
@@ -43,6 +48,7 @@ test("restricts image URLs to the current task attachment path", () => {
   assert.match(url.pathname, new RegExp(`/projects/${projectId}/work-items/${itemId}/attachments/`));
   assert.throws(() => safeAssetURL(config, projectId, itemId, "https://other.example/image.png"), /External image URL blocked/);
   assert.throws(() => safeAssetURL(config, projectId, itemId, "../comments/secret"), /outside the task attachment endpoint/);
+  assert.throws(() => safeAssetURL(config, "../../projects", itemId, "33333333-3333-4333-8333-333333333333"), /Invalid Plane project or task ID/);
 });
 
 test("follows Plane cursor pages and rejects a repeated cursor", async () => {
@@ -119,9 +125,57 @@ test("lists task title and state without scanning the workspace project list", a
     });
     throw new Error(`Unexpected Plane API route: ${url.pathname}`);
   };
-  const response = await callTool("list_plane_tasks", { assignee: "all" });
+  const response = await callTool("list_plane_tasks", { assignee: "all", projects: "DEMO" });
   assert.match(response.result.content[0].text, /DEMO-759 \| In Progress \| Task title/);
   assert.equal(paths.some((path) => path.endsWith("/projects/")), false, "only configured project UUID is queried");
+});
+
+test("uses project UUIDs supplied by each local MCP caller", async () => {
+  const paths = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(input);
+    paths.push(url.pathname);
+    if (url.pathname.endsWith(`/projects/${userProjectId}/`)) return Response.json({ id: userProjectId, identifier: "USERPROJECT", name: "User Project" });
+    if (url.pathname.endsWith("/members/")) return Response.json({ results: [], next_page_results: false });
+    if (url.pathname.endsWith("/states/")) return Response.json({ results: [{ id: "state-1", name: "Todo", group: "unstarted" }], next_page_results: false });
+    if (url.pathname.endsWith("/work-items/")) return Response.json({
+      results: [{ id: itemId, sequence_id: 12, name: "Private project task", state: "state-1", assignees: [] }],
+      next_page_results: false,
+    });
+    throw new Error(`Unexpected Plane API route: ${url.pathname}`);
+  };
+  const response = await callTool("list_plane_tasks", {
+    projects: "USERPROJECT",
+    user_projects: [{ key: "custom", id: userProjectId, identifier: "USERPROJECT", name: "User Project" }],
+    assignee: "all",
+  });
+  assert.match(response.result.content[0].text, /USERPROJECT-12 \| Todo \| Private project task/);
+  assert.ok(paths.includes(`/api/v1/workspaces/test/projects/${userProjectId}/`));
+  assert.ok(!paths.some((path) => path.includes(projectId)));
+});
+
+test("routes task details by the caller's project prefix and UUID", async () => {
+  const paths = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(input);
+    paths.push(url.pathname);
+    if (url.pathname.endsWith("/work-items/USERPROJECT-12/")) {
+      return Response.json({ id: itemId, sequence_id: 12, project: userProjectId, state: "state-1", name: "Caller task", assignees: [], description_html: "" });
+    }
+    if (url.pathname.endsWith("/states/")) return Response.json({ results: [{ id: "state-1", name: "Todo", group: "unstarted" }], next_page_results: false });
+    if (url.pathname.endsWith("/members/") || url.pathname.endsWith("/labels/") || url.pathname.endsWith("/links/") ||
+        url.pathname.endsWith("/comments/") || url.pathname.endsWith("/attachments/")) {
+      return Response.json({ results: [], next_page_results: false });
+    }
+    throw new Error(`Unexpected Plane API route: ${url.pathname}`);
+  };
+  const response = await callTool("get_plane_task", {
+    task_identifier: "USERPROJECT-12",
+    user_projects: [{ key: "custom", id: userProjectId, identifier: "USERPROJECT", name: "User Project" }],
+  });
+  assert.match(response.result.content[0].text, /Caller task/);
+  assert.ok(paths.includes(`/api/v1/workspaces/test/work-items/USERPROJECT-12/`));
+  assert.ok(paths.some((path) => path.includes(`/projects/${userProjectId}/states/`)));
 });
 
 test("filters tasks by the authenticated Plane user ID", async () => {
@@ -137,7 +191,7 @@ test("filters tasks by the authenticated Plane user ID", async () => {
     });
     throw new Error(`Unexpected Plane API route: ${url.pathname}`);
   };
-  const response = await callTool("list_plane_tasks", { assignee: userId });
+  const response = await callTool("list_plane_tasks", { assignee: userId, projects: "DEMO" });
   assert.match(response.result.content[0].text, /DEMO-759 \| Todo \| Assigned to me/);
 });
 

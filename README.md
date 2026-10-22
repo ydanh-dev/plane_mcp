@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 The one-line form executes the downloaded installer directly. Inspect it first if you prefer to review installation scripts before execution.
 
-For manual source review, download [Plane MCP v0.2.1 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.1.zip).
+For manual source review, download [Plane MCP v0.2.2 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.2.zip).
 
 On Windows, download and inspect `install.ps1`, then run it in PowerShell:
 
@@ -123,11 +123,11 @@ Cloud Run requires an active billing account. Its free tier is usage-based, not 
 
 ### Experimental Cloudflare Workers backend
 
-The stateless Worker is deployed at `https://plane-mcp.apetechs.workers.dev/mcp` with the NP, Busan, and NTSSv2 projects allowlisted. Its health endpoint and MCP initialization/tool discovery are verified. A live Plane API request and end-to-end task latency benchmark have not been run.
+The stateless Worker can be deployed at `https://plane-mcp.apetechs.workers.dev/mcp`. Project UUIDs are sent by the local MCP from each user's own config with each request; the Worker verifies the UUID and task-code prefix against Plane using that user's token. The Worker does not keep a shared project list.
 
-After installing and configuring the local Plane MCP (including the user's own Plane token in the OS credential store), run `plane-mcp remote https://plane-mcp.apetechs.workers.dev/mcp`, then reload Codex or Antigravity. To develop the Worker, install Node.js 20+, then from `cloudflare/worker` run `npm ci` and `npm test`. For redeploys, pass the production `PLANE_PROJECTS_JSON` and `PLANE_DEFAULT_PROJECT` as Wrangler `--var` values; copy the existing values from the Cloudflare dashboard because project IDs are intentionally not committed here. Never put Plane tokens in these variables.
+After installing and configuring the local Plane MCP (including the user's own Plane token in the OS credential store), run `plane-mcp remote https://plane-mcp.apetechs.workers.dev/mcp`, then reload Codex or Antigravity. To develop or deploy the Worker, install Node.js 20+, then from `cloudflare/worker` run `npm ci`, `npm test`, and `npx wrangler deploy`. Only the shared Plane API URL and workspace slug belong in Worker variables; project UUIDs and Plane tokens do not.
 
-The local bridge still reads each user's Plane token from the OS credential store and sends it to the configured Worker over HTTPS for each uncached call. The Worker forwards it to Plane in memory and does not store it. Only deploy to an account you control and trust. The local bridge caches successful tool responses for 60 seconds per token; `force_refresh=true` bypasses that cache.
+The local bridge reads each user's Plane token from the OS credential store and sends it to the configured Worker over HTTPS for each uncached call. The Worker forwards it to Plane in memory and does not store it. Plane's own permissions for that token are the access boundary; this public Worker does not impose a separate company-wide per-user project policy. Only use a Worker you control and trust. The local bridge caches successful tool responses for 60 seconds per token; `force_refresh=true` bypasses that cache.
 
 Cloudflare advertises a Free plan with no card required, 100,000 requests/day, and a 10 ms CPU limit per request ([official limits](https://developers.cloudflare.com/workers/platform/limits/), [Workers overview](https://www.cloudflare.com/products/workers/)). The CPU cap is the main risk: large task lists or image-heavy details may exceed it. Inline images over 128 KiB are currently skipped; benchmark before asking other users to switch.
 
@@ -220,7 +220,7 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 Dạng một dòng thực thi trực tiếp installer vừa tải về. Nếu muốn xem script trước, hãy dùng cách tải file rồi đọc ở trên.
 
-Nếu muốn xem source thủ công, tải [Plane MCP v0.2.1 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.1.zip).
+Nếu muốn xem source thủ công, tải [Plane MCP v0.2.2 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.2.zip).
 
 Trên Windows, tải và đọc `install.ps1`, sau đó chạy bằng PowerShell:
 
@@ -302,11 +302,11 @@ Cloud Run yêu cầu project có billing account hoạt động. Free tier tính
 
 ### Prototype backend Cloudflare Workers
 
-Worker stateless đã được deploy tại `https://plane-mcp.apetechs.workers.dev/mcp`, với allowlist gồm NP, Busan và NTSSv2. Đã xác minh health endpoint, MCP initialization và danh sách tools. Chưa gọi Plane API thật và chưa benchmark thời gian đọc task end-to-end.
+Worker stateless có thể deploy tại `https://plane-mcp.apetechs.workers.dev/mcp`. MCP local gửi UUID project từ config riêng của từng user trong mỗi request; Worker kiểm tra UUID và task-code prefix với Plane bằng token của user đó. Worker không lưu danh sách project dùng chung.
 
-Sau khi cài và cấu hình Plane MCP local (bao gồm token Plane riêng của user trong kho credential hệ điều hành), chạy `plane-mcp remote https://plane-mcp.apetechs.workers.dev/mcp`, rồi reload Codex hoặc Antigravity. Để phát triển Worker, cài Node.js 20+, vào `cloudflare/worker`, chạy `npm ci` và `npm test`. Khi deploy lại, truyền `PLANE_PROJECTS_JSON` và `PLANE_DEFAULT_PROJECT` production bằng tham số Wrangler `--var`; lấy giá trị hiện tại trong Cloudflare dashboard vì project ID được cố ý giữ ngoài repo. Tuyệt đối không đưa Plane token vào các biến này.
+Sau khi cài và cấu hình Plane MCP local (bao gồm token Plane riêng của user trong kho credential hệ điều hành), chạy `plane-mcp remote https://plane-mcp.apetechs.workers.dev/mcp`, rồi reload Codex hoặc Antigravity. Để phát triển hoặc deploy Worker, cài Node.js 20+, vào `cloudflare/worker`, chạy `npm ci`, `npm test` và `npx wrangler deploy`. Chỉ URL Plane và workspace slug dùng chung nằm trong biến Worker; không đưa UUID project hoặc Plane token vào đó.
 
-Local bridge vẫn lấy token của từng user từ credential store hệ điều hành và gửi qua HTTPS tới Worker cho mỗi lần gọi chưa có cache. Worker chuyển tiếp token tới Plane trong bộ nhớ rồi không lưu lại. Chỉ deploy lên tài khoản bạn quản lý và tin cậy. Local bridge cache kết quả tool thành công trong 60 giây theo từng token; `force_refresh=true` bỏ qua cache.
+Local bridge lấy token của từng user từ credential store hệ điều hành và gửi qua HTTPS tới Worker cho mỗi lần gọi chưa có cache. Worker chuyển tiếp token tới Plane trong bộ nhớ rồi không lưu lại. Quyền của chính token Plane là ranh giới truy cập; Worker công khai này không áp dụng chính sách project riêng cho từng user ở phía công ty. Chỉ dùng Worker bạn quản lý và tin cậy. Local bridge cache kết quả tool thành công trong 60 giây theo từng token; `force_refresh=true` bỏ qua cache.
 
 Cloudflare quảng bá Workers Free không cần thẻ, tối đa 100.000 request/ngày và giới hạn CPU 10 ms cho mỗi request ([giới hạn chính thức](https://developers.cloudflare.com/workers/platform/limits/), [Workers](https://www.cloudflare.com/products/workers/)). Rủi ro chính là giới hạn CPU: danh sách task lớn hoặc task có nhiều ảnh có thể vượt ngưỡng. Ảnh inline lớn hơn 128 KiB hiện bị bỏ qua; hãy benchmark trước khi chuyển user khác sang dùng.
 

@@ -141,6 +141,10 @@ class ProjectScopeTests(unittest.TestCase):
         self.assertEqual(plane_mcp.remote_project_filter(""), "DEMOALPHA")
         self.assertEqual(plane_mcp.remote_project_filter("beta"), "DEMOBETA")
         self.assertEqual(set(plane_mcp.remote_project_filter("all").split(",")), {"DEMOALPHA", "DEMOBETA"})
+        self.assertEqual(plane_mcp.configured_projects("all"), [
+            {"key": "alpha", **CONFIG["projects"]["alpha"]},
+            {"key": "beta", **CONFIG["projects"]["beta"]},
+        ])
         result = SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text="Plane projects\n\nDEMOALPHA | Demo Alpha | id-a\nDEMOBETA | Demo Beta | id-b")])
         with patch.object(plane_mcp, "PLANE_PROJECTS", {"alpha": CONFIG["projects"]["alpha"]}):
             self.assertEqual(plane_mcp.remote_project_listing(result), "Plane projects\n\nDEMOALPHA | Demo Alpha | id-a")
@@ -263,6 +267,16 @@ class ProjectScopeTests(unittest.TestCase):
         output = plane_mcp.list_plane_projects()
         self.assertIn("DEMOALPHA", output)
         self.assertNotIn("SECRET", output)
+
+    def test_remote_project_listing_sends_this_users_project_uuids(self):
+        result = SimpleNamespace(isError=False, content=[SimpleNamespace(
+            type="text", text=f"Plane projects\n\nDEMOALPHA | Demo Alpha | {CONFIG['projects']['alpha']['id']}"
+        )])
+        with patch.object(plane_mcp, "REMOTE_MCP_URL", "https://mcp.example/mcp"), \
+             patch.object(plane_mcp, "call_remote_tool", return_value=result) as call:
+            self.assertIn("DEMOALPHA", plane_mcp.list_plane_projects())
+        self.assertEqual(call.call_args.args[0], "list_plane_projects")
+        self.assertEqual(call.call_args.args[1]["user_projects"], plane_mcp.configured_projects("all"))
 
 
 if __name__ == "__main__":

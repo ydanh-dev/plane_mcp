@@ -29,32 +29,29 @@ function configFrom(env) {
   }
   const workspace = String(env.PLANE_WORKSPACE_SLUG || "apetechs");
   if (!/^[a-zA-Z0-9-]+$/.test(workspace)) throw new Error("Invalid Plane workspace slug");
-  let projects;
-  try {
-    projects = JSON.parse(env.PLANE_PROJECTS_JSON || "{}");
-  } catch {
-    throw new Error("PLANE_PROJECTS_JSON must be valid JSON");
+  return { api: base.toString().replace(/\/$/, ""), workspace };
+}
+
+function configForUser(config, userProjects) {
+  if (!Array.isArray(userProjects) || !userProjects.length) {
+    throw new Error("Update the local Plane MCP so it sends your configured project UUIDs to this Worker");
   }
-  if (!projects || Array.isArray(projects) || typeof projects !== "object" || !Object.keys(projects).length) {
-    throw new Error("Configure at least one project in PLANE_PROJECTS_JSON");
-  }
-  for (const [key, project] of Object.entries(projects)) {
-    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(key) || !project ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(project.id || "") ||
-        !/^[A-Za-z][A-Za-z0-9]*$/.test(project.identifier || "")) {
-      throw new Error(`Invalid Plane project configuration: ${key}`);
+  const projects = {};
+  const ids = new Set();
+  const identifiers = new Set();
+  for (const project of userProjects) {
+    const { key, id, identifier, name = key } = project || {};
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(key || "") ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id || "") ||
+        !/^[A-Za-z][A-Za-z0-9]*$/.test(identifier || "") || projects[key] || ids.has(id.toLowerCase()) ||
+        identifiers.has(identifier.toUpperCase())) {
+      throw new Error("Invalid or duplicate project in this user's local Plane MCP config");
     }
-    project.id = project.id.toLowerCase();
+    ids.add(id.toLowerCase());
+    identifiers.add(identifier.toUpperCase());
+    projects[key] = { id: id.toLowerCase(), identifier, name };
   }
-  const defaultProject = String(env.PLANE_DEFAULT_PROJECT || "");
-  if (defaultProject && !projects[defaultProject]) throw new Error("PLANE_DEFAULT_PROJECT must match a configured project key");
-  return {
-    api: base.toString().replace(/\/$/, ""),
-    workspace,
-    projects,
-    defaultProject,
-    defaultAssignee: String(env.PLANE_DEFAULT_ASSIGNEE || ""),
-  };
+  return { ...config, projects };
 }
 
 function apiUrl(config, path, query = {}) {
@@ -130,10 +127,7 @@ async function fetchItems(config, token, projectId, fields = "") {
 
 function configuredProjects(config, requested = "") {
   const value = requested.trim();
-  if (!value) {
-    if (!config.defaultProject) throw new Error("Specify projects by key/identifier, or configure PLANE_DEFAULT_PROJECT");
-    return [{ key: config.defaultProject, ...config.projects[config.defaultProject] }];
-  }
+  if (!value) throw new Error("Specify a project key/identifier, or configure the default project locally");
   if (value.toLowerCase() === "all") {
     return Object.entries(config.projects).map(([key, project]) => ({ key, ...project }));
   }
@@ -258,6 +252,10 @@ function itemBasePath(config, projectId, itemId) {
 }
 
 function safeAssetURL(config, projectId, itemId, source) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(projectId) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(itemId)) {
+    throw new Error("Invalid Plane project or task ID");
+  }
   const itemBase = apiUrl(config, itemBasePath(config, projectId, itemId));
   let url;
   if (/^[0-9a-f-]{16,}$/i.test(source)) url = new URL(encodeURIComponent(source), itemBase);
@@ -427,10 +425,11 @@ async function taskDetail(config, token, origin, taskIdentifier, forceRefresh) {
 }
 
 async function listTasks(config, token, args) {
+  config = configForUser(config, args.user_projects);
   const projects = configuredProjects(config, args.projects || "");
   const selected = await fetchConfiguredProjects(config, token, projects);
   const members = await fetchMembers(config, token);
-  const assignee = (args.assignee || config.defaultAssignee).trim();
+  const assignee = (args.assignee || "").trim();
   const memberIds = assigneeFilterIds(members, assignee || "all");
   const itemsPerProject = await Promise.all(selected.map(async (project) => {
     const [stateRows, items] = await Promise.all([
@@ -470,13 +469,14 @@ async function listTasks(config, token, args) {
 }
 
 function createServer(config, token, origin) {
-  const server = new McpServer({ name: "Plane", version: "0.2.1" });
+  const server = new McpServer({ name: "Plane", version: "0.2.2" });
   server.registerTool("list_plane_projects", {
-    description: "List only Plane projects explicitly configured on this server.",
-    inputSchema: {},
+    description: "List the projects configured in the calling user's local Plane MCP.",
+    inputSchema: { user_projects: z.array(z.object({ key: z.string(), id: z.string(), identifier: z.string(), name: z.string().optional() })).min(1) },
     annotations: { readOnlyHint: true },
-  }, async () => {
-    const visible = await fetchConfiguredProjects(config, token, configuredProjects(config, "all"));
+  }, async ({ user_projects }) => {
+    const userConfig = configForUser(config, user_projects);
+    const visible = await fetchConfiguredProjects(userConfig, token, configuredProjects(userConfig, "all"));
     return { content: [{ type: "text", text: `Plane projects\n\n${visible.map((project) => `${project.identifier || "?"} | ${project.name || "-"} | ${project.id || "?"}`).join("\n")}` }] };
   });
   server.registerTool("list_plane_tasks", {
@@ -485,21 +485,22 @@ function createServer(config, token, origin) {
       assignee: z.string().optional(), query: z.string().optional(), state: z.string().optional(),
       priority: z.string().optional(), include_closed: z.boolean().optional(), limit: z.number().optional(),
       force_refresh: z.boolean().optional(), projects: z.string().optional(),
+      user_projects: z.array(z.object({ key: z.string(), id: z.string(), identifier: z.string(), name: z.string().optional() })).min(1),
     },
     annotations: { readOnlyHint: true },
   }, async (args) => ({ content: [{ type: "text", text: await listTasks(config, token, args) }] }));
   server.registerTool("get_plane_task", {
     description: "Read a task by full Plane code, including its description, comments, image attachments, and links.",
-    inputSchema: { task_identifier: z.string(), force_refresh: z.boolean().optional() },
+    inputSchema: {
+      task_identifier: z.string(), force_refresh: z.boolean().optional(),
+      user_projects: z.array(z.object({ key: z.string(), id: z.string(), identifier: z.string(), name: z.string().optional() })).min(1),
+    },
     annotations: { readOnlyHint: true },
-  }, async ({ task_identifier, force_refresh = false }) => taskDetail(config, token, origin, task_identifier, force_refresh));
+  }, async ({ task_identifier, force_refresh = false, user_projects }) => {
+    const userConfig = configForUser(config, user_projects);
+    return taskDetail(userConfig, token, origin, task_identifier, force_refresh);
+  });
   return server;
-}
-
-function projectById(config, id) {
-  const project = Object.values(config.projects).find((entry) => entry.id === id.toLowerCase());
-  if (!project) throw new Error("Project is outside the configured allowlist");
-  return project;
 }
 
 export default {
@@ -515,9 +516,7 @@ export default {
     if (url.pathname === "/assets" && request.method === "GET") {
       try {
         const projectId = url.searchParams.get("project_id") || "";
-        projectById(config, projectId);
         const itemId = url.searchParams.get("item_id") || "";
-        if (!/^[0-9a-f-]{16,}$/i.test(itemId)) throw new Error("Invalid Plane item ID");
         const source = url.searchParams.get("source") || "";
         if (!source || source.length > 4096) throw new Error("Invalid Plane asset source");
         return await streamAsset(config, token, projectId, itemId, source);
@@ -531,4 +530,4 @@ export default {
   },
 };
 
-export { bearerToken, configFrom, fetchPages, htmlMarkdown, safeAssetURL, streamAsset };
+export { bearerToken, configForUser, configFrom, fetchPages, htmlMarkdown, safeAssetURL, streamAsset };
