@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 The one-line form executes the downloaded installer directly. Inspect it first if you prefer to review installation scripts before execution.
 
-For manual source review, download [Plane MCP v0.2.3 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.3.zip).
+For manual source review, download [Plane MCP v0.3.0 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.3.0.zip).
 
 On Windows, the installer also installs a private Python runtime and dependencies; Python and Git do not need to be installed first. To inspect the script before running it:
 
@@ -138,6 +138,36 @@ The local bridge reads each user's Plane token from the OS credential store and 
 
 Cloudflare advertises a Free plan with no card required, 100,000 requests/day, and a 10 ms CPU limit per request ([official limits](https://developers.cloudflare.com/workers/platform/limits/), [Workers overview](https://www.cloudflare.com/products/workers/)). The CPU cap is the main risk: large task lists or image-heavy details may exceed it. Inline images over 128 KiB are currently skipped; benchmark before asking other users to switch.
 
+### Creating tasks with images
+
+Two write tools let an assistant (Codex, Claude, ...) create a task and attach pictures to it:
+
+- `create_plane_task(name, description, project, priority, image_paths)` creates a task in exactly one configured project, then attaches each image.
+- `attach_images_to_plane_task(task_identifier, image_paths)` adds images to an existing task.
+
+Rules: the Plane API token must have **write** access (the read-only token from the first setup may not). `image_paths` are files on the same computer as the MCP process (png, jpg, gif, webp, bmp, up to 20 MiB each); every file is checked, including its real content, before anything is written, so a bad path creates nothing. If a picture fails to upload, the task is still reported as created and the failed files are listed; do not repeat the call blindly or you may get a duplicate task. These tools always talk to Plane directly from the local process, even when `plane-mcp remote` is on, because a cloud backend cannot read files on the user's computer. Ask the assistant to name the project explicitly.
+
+### Slow machines and checking your setup
+
+The installer is safe to run again: if an earlier install failed or was interrupted, running the same command continues with whatever is missing (source, `uv`, Python, dependencies, setup) instead of starting over, and an older install it did not create is moved aside to `plane-mcp.backup-<time>`, never deleted.
+
+Local mode runs the Plane MCP process on the user's machine: it fetches the task list, parses HTML and writes images to disk. The model itself never runs locally, so no GPU is used. Measured on one Mac, listing tasks used about 0.05 s of CPU and 65 MB of RAM, so the wait is mostly network time to Plane. `plane-mcp setup` asks whether to use the company Cloudflare Worker; with it, the Plane fetching and HTML work run in the cloud and the local process is a thin bridge, at the cost of one extra network hop (a few hundred ms to a few seconds slower in the same test). Switch any time:
+
+```sh
+plane-mcp remote https://YOUR-SERVICE/mcp   # heavy work moves to the cloud
+plane-mcp remote off                        # back to local
+```
+
+The token still lives only in the OS credential store; the local process becomes a thin bridge.
+
+After `plane-mcp setup` (which asks for the API token and stores it in the credential store), run:
+
+```sh
+plane-mcp doctor
+```
+
+It checks the config, that a token is stored (never printed), the Plane API and each project, and, in remote mode, the backend's `/healthz`, with a timing for each step. It exits non-zero if anything fails. Compare timings with and without `plane-mcp remote` on the slow machine before rolling out. Project, state, member and label lookups are cached for 10 minutes; task lists and details for 60 seconds (`force_refresh=true` bypasses the cache).
+
 ### Updates
 
 Run this when you want to check for a release:
@@ -153,6 +183,7 @@ There is no background service, so users will not get a pop-up while the MCP is 
 Other commands:
 
 ```sh
+plane-mcp doctor
 plane-mcp status
 plane-mcp setup
 plane-mcp remote https://YOUR-SERVICE.run.app/mcp
@@ -228,7 +259,7 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 Dạng một dòng thực thi trực tiếp installer vừa tải về. Nếu muốn xem script trước, hãy dùng cách tải file rồi đọc ở trên.
 
-Nếu muốn xem source thủ công, tải [Plane MCP v0.2.3 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.2.3.zip).
+Nếu muốn xem source thủ công, tải [Plane MCP v0.3.0 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.3.0.zip).
 
 Trên Windows, installer cũng tự cài Python riêng và dependencies; không cần cài Python hay Git trước. Để xem script trước khi chạy:
 
@@ -324,6 +355,36 @@ Local bridge lấy token của từng user từ credential store hệ điều h�
 
 Cloudflare quảng bá Workers Free không cần thẻ, tối đa 100.000 request/ngày và giới hạn CPU 10 ms cho mỗi request ([giới hạn chính thức](https://developers.cloudflare.com/workers/platform/limits/), [Workers](https://www.cloudflare.com/products/workers/)). Rủi ro chính là giới hạn CPU: danh sách task lớn hoặc task có nhiều ảnh có thể vượt ngưỡng. Ảnh inline lớn hơn 128 KiB hiện bị bỏ qua; hãy benchmark trước khi chuyển user khác sang dùng.
 
+### Tạo task kèm ảnh
+
+Hai tool ghi cho phép trợ lý (Codex, Claude, ...) tạo task và đính kèm ảnh:
+
+- `create_plane_task(name, description, project, priority, image_paths)` tạo task trong đúng một project đã cấu hình, rồi đính kèm từng ảnh.
+- `attach_images_to_plane_task(task_identifier, image_paths)` thêm ảnh vào task có sẵn.
+
+Quy tắc: API token của Plane phải có quyền **ghi** (token chỉ đọc từ lần setup đầu có thể chưa đủ). `image_paths` là tệp nằm trên cùng máy với tiến trình MCP (png, jpg, gif, webp, bmp, mỗi tệp tối đa 20 MiB); mọi tệp được kiểm tra, kể cả nội dung thật, trước khi ghi bất cứ thứ gì, nên đường dẫn sai sẽ không tạo gì cả. Nếu một ảnh tải lên lỗi, task vẫn được báo là đã tạo và các tệp lỗi được liệt kê; đừng gọi lại một cách mù quáng vì có thể tạo trùng task. Các tool này luôn gọi thẳng Plane từ tiến trình local, kể cả khi bật `plane-mcp remote`, vì backend cloud không đọc được tệp trên máy người dùng. Hãy yêu cầu trợ lý nêu rõ tên project.
+
+### Máy yếu và kiểm tra cấu hình
+
+Installer chạy lại an toàn: nếu lần cài trước bị lỗi hoặc bị ngắt, chạy lại đúng lệnh đó sẽ làm tiếp phần còn thiếu (mã nguồn, `uv`, Python, thư viện, setup) thay vì làm lại từ đầu. Bản cài cũ không do installer tạo sẽ được chuyển sang `plane-mcp.backup-<giờ>`, không bị xóa.
+
+Chế độ local chạy tiến trình Plane MCP trên máy người dùng: tải danh sách task, phân tích HTML và ghi ảnh ra đĩa. Model không chạy trên máy nên không dùng GPU. Đo trên một máy Mac, liệt kê task chỉ tốn khoảng 0,05 giây CPU và 65 MB RAM, nên thời gian chờ chủ yếu là mạng tới Plane. `plane-mcp setup` sẽ hỏi có dùng Cloudflare Worker của công ty không; khi dùng, phần tải dữ liệu Plane và xử lý HTML chạy trên cloud, tiến trình local chỉ là cầu nối mỏng, đổi lại thêm một chặng mạng (chậm hơn vài trăm mili giây đến vài giây trong cùng bài đo). Đổi qua lại bất cứ lúc nào:
+
+```sh
+plane-mcp remote https://YOUR-SERVICE/mcp   # việc nặng chạy trên cloud
+plane-mcp remote off                        # quay lại chạy local
+```
+
+Token vẫn chỉ nằm trong kho credential của hệ điều hành; tiến trình local chỉ còn là cầu nối mỏng.
+
+Sau `plane-mcp setup` (hỏi API token và lưu vào kho credential), chạy:
+
+```sh
+plane-mcp doctor
+```
+
+Lệnh này kiểm tra file cấu hình, token đã được lưu (không in ra), Plane API và từng project, và ở chế độ remote thì thêm `/healthz` của backend, kèm thời gian từng bước. Có lỗi thì lệnh trả mã khác 0. Hãy so thời gian khi có và không có `plane-mcp remote` trên máy yếu trước khi triển khai cho cả công ty. Thông tin project, state, member, label được cache 10 phút; danh sách và chi tiết task cache 60 giây (`force_refresh=true` để bỏ qua cache).
+
 ### Cập nhật
 
 Khi muốn kiểm tra có bản mới, chạy:
@@ -339,6 +400,7 @@ Không có dịch vụ chạy nền nên user không nhận popup khi MCP đang 
 Các lệnh khác:
 
 ```sh
+plane-mcp doctor
 plane-mcp status
 plane-mcp setup
 plane-mcp remote https://YOUR-SERVICE.run.app/mcp

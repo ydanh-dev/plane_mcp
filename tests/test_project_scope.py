@@ -35,6 +35,29 @@ with patch.dict(os.environ, {"PLANE_MCP_CONFIG": str(CONFIG_PATH), "PLANE_API_TO
 
 
 class ProjectScopeTests(unittest.TestCase):
+    def test_remote_call_works_inside_a_running_event_loop(self):
+        # FastMCP runs sync tools on the event loop; a bare anyio.run() there fails with "Already running asyncio".
+        async def fake_remote(_url, _token, _name, _arguments):
+            return SimpleNamespace(isError=False, content=[])
+
+        async def inside_loop():
+            with patch.object(plane_mcp, "REMOTE_MCP_URL", "https://mcp.example/mcp"), \
+                 patch.object(plane_mcp, "_call_remote_tool", fake_remote), \
+                 patch.object(plane_mcp, "get_api_token", return_value="loop-token"):
+                return plane_mcp.call_remote_tool("list_plane_projects", {"force_refresh": True})
+
+        self.assertFalse(anyio.run(inside_loop).isError)
+
+    def test_cache_honours_per_entry_ttl(self):
+        with patch.dict(os.environ, {"PLANE_API_TOKEN": "test-token"}), \
+             patch.object(plane_mcp, "get_api_token", return_value="ttl-token"), \
+             patch.object(plane_mcp.time, "monotonic", side_effect=[0, 0, 100, 100, 700, 700]):
+            plane_mcp.set_cached("short", "a")  # default 60 s, set at t=0
+            plane_mcp.set_cached("long", "b", plane_mcp.CACHE_TTL_METADATA)  # 600 s, set at t=0
+            self.assertIsNone(plane_mcp.get_cached("short"))  # t=100: expired
+            self.assertEqual(plane_mcp.get_cached("long"), "b")  # t=100: still fresh
+            self.assertIsNone(plane_mcp.get_cached("long"))  # t=700: expired
+
     def test_default_assignee_uses_the_current_plane_user_id(self):
         user_id = "33333333-3333-4333-8333-333333333333"
         members = [{"member": {"id": user_id, "display_name": "Dev Name", "email": "dev@example.com"}}]
@@ -277,6 +300,118 @@ class ProjectScopeTests(unittest.TestCase):
             self.assertIn("DEMOALPHA", plane_mcp.list_plane_projects())
         self.assertEqual(call.call_args.args[0], "list_plane_projects")
         self.assertEqual(call.call_args.args[1]["user_projects"], plane_mcp.configured_projects("all"))
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+class CreateTaskWithImagesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.temp.name)
+        self.calls = []
+
+        def fake_api_send(method, path, payload):
+            self.calls.append((method, path.split("/projects/")[-1], payload))
+            if method == "POST" and path.endswith("/work-items/"):
+                return {"id": "item-1", "sequence_id": 7}
+            if method == "POST":
+                return {"asset_id": f"asset-{len(self.calls)}", "upload_data": {"url": "https://storage.example/up", "fields": {"key": "k"}}}
+            return {}
+
+        self.send = patch.object(plane_mcp, "api_send", side_effect=fake_api_send)
+        self.storage = patch.object(plane_mcp, "post_to_storage")
+        self.send.start()
+        self.post_to_storage = self.storage.start()
+
+    def tearDown(self):
+        self.send.stop()
+        self.storage.stop()
+        self.temp.cleanup()
+
+    def image(self, name="a.png", data=PNG):
+        path = self.dir / name
+        path.write_bytes(data)
+        return str(path)
+
+    def test_creates_the_task_then_uploads_every_image_in_order(self):
+        result = plane_mcp.create_plane_task("Fix login", "Line one\nLine <two>", "alpha", "high", [self.image("a.png"), self.image("b.png")])
+
+        self.assertIn("Created DEMOALPHA-7: Fix login", result)
+        self.assertIn("Images attached: 2/2", result)
+        self.assertEqual([call[0] for call in self.calls], ["POST", "POST", "PATCH", "POST", "PATCH"])
+        self.assertEqual(self.calls[0][2]["description_html"], "<p>Line one</p><p>Line &lt;two&gt;</p>")
+        self.assertEqual(self.calls[0][2]["priority"], "high")
+        self.assertEqual(self.calls[1][2], {"name": "a.png", "type": "image/png", "size": len(PNG)})
+        self.assertEqual(self.post_to_storage.call_count, 2)
+
+    def test_a_bad_image_stops_everything_before_the_first_write(self):
+        with self.assertRaisesRegex(ValueError, "Not an image file"):
+            plane_mcp.create_plane_task("Task", "", "alpha", "none", [self.image(), str(self.dir / "missing.png")])
+        self.assertEqual(self.calls, [])
+
+    def test_a_renamed_non_image_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "not a real image/png"):
+            plane_mcp.create_plane_task("Task", "", "alpha", "none", [self.image("fake.png", b"just text, not a png")])
+        self.assertEqual(self.calls, [])
+
+    def test_a_symlink_to_another_file_is_rejected(self):
+        secret = self.dir / "secret.txt"
+        secret.write_text("private")
+        (self.dir / "looks-like.png").symlink_to(secret)
+        with self.assertRaisesRegex(ValueError, "Not an image file"):
+            plane_mcp.load_image(str(self.dir / "looks-like.png"))
+
+    def test_a_failed_upload_is_reported_and_the_task_is_still_reported_created(self):
+        self.post_to_storage.side_effect = OSError("storage down")
+        result = plane_mcp.create_plane_task("Task", "", "alpha", "none", [self.image()])
+
+        self.assertIn("Created DEMOALPHA-7", result)
+        self.assertIn("Images attached: 0/1", result)
+        self.assertIn("a.png: storage down", result)
+
+    def test_exactly_one_project_and_a_known_priority_are_required(self):
+        with self.assertRaisesRegex(ValueError, "exactly one project"):
+            plane_mcp.create_plane_task("Task", "", "all")
+        with self.assertRaisesRegex(ValueError, "priority"):
+            plane_mcp.create_plane_task("Task", "", "alpha", "asap")
+        self.assertEqual(self.calls, [])
+
+    def test_assignee_is_resolved_to_one_member_before_any_write(self):
+        user_id = "33333333-3333-4333-8333-333333333333"
+        members = [{"member": {"id": user_id, "display_name": "Dev Name", "email": "dev@example.com"}},
+                   {"member": {"id": "44444444-4444-4444-8444-444444444444", "display_name": "Other", "email": "o@example.com"}}]
+        with patch.object(plane_mcp, "fetch_members", return_value=members):
+            plane_mcp.create_plane_task("Task", "", "alpha", assignee="dev@example.com")
+            self.assertEqual(self.calls[0][2]["assignees"], [user_id])
+            self.calls.clear()
+            for bad in ("nobody", "all"):
+                with self.assertRaisesRegex(ValueError, "exactly one workspace member"):
+                    plane_mcp.create_plane_task("Task", "", "alpha", assignee=bad)
+        self.assertEqual(self.calls, [])
+
+    def test_the_new_task_shows_up_in_the_next_list(self):
+        project_id = CONFIG["projects"]["alpha"]["id"]
+        plane_mcp.set_cached(f"items_{project_id}_all", ["stale"])
+        plane_mcp.create_plane_task("Task", "", "alpha")
+        self.assertIsNone(plane_mcp.get_cached(f"items_{project_id}_all"))
+
+    def test_attach_images_to_an_existing_task(self):
+        item = {"project": CONFIG["projects"]["alpha"]["id"], "id": "item-9"}
+        with patch.object(plane_mcp, "find_item", return_value=(item, {})):
+            result = plane_mcp.attach_images_to_plane_task("demoalpha-9", [self.image()])
+        self.assertEqual(result, "DEMOALPHA-9\nImages attached: 1/1")
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            plane_mcp.attach_images_to_plane_task("DEMOALPHA-9", [])
+
+    def test_multipart_puts_the_form_fields_first_and_the_file_last(self):
+        body, content_type = plane_mcp.multipart_body({"key": "k1", "policy": "p"}, 'a"b.png', "image/png", PNG)
+        text = body.decode("latin-1")
+        self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
+        self.assertLess(text.index('name="key"'), text.index('name="policy"'))
+        self.assertLess(text.index('name="policy"'), text.index('name="file"'))
+        self.assertIn('filename="ab.png"', text)
+        self.assertTrue(text.rstrip().endswith("--"))
 
 
 if __name__ == "__main__":

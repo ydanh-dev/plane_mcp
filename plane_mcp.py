@@ -41,8 +41,9 @@ CONFIG_PATH = Path(os.environ.get("PLANE_MCP_CONFIG", Path.home() / ".config/pla
 try:
     CONFIG_JSON = os.environ.get("PLANE_MCP_CONFIG_JSON", "")
     USER_CONFIG = json.loads(CONFIG_JSON) if CONFIG_JSON else json.loads(CONFIG_PATH.read_text())
-except FileNotFoundError as error:
-    raise RuntimeError(f"Plane MCP is not configured. Run `plane-mcp setup` ({CONFIG_PATH})") from error
+except FileNotFoundError:
+    # One readable line for the MCP client log instead of a traceback.
+    raise SystemExit(f"Plane MCP is not configured. Run `plane-mcp setup` ({CONFIG_PATH})") from None
 except (OSError, json.JSONDecodeError) as error:
     raise RuntimeError(f"Cannot read Plane MCP config at {CONFIG_PATH}: {error}") from error
 
@@ -435,7 +436,9 @@ def call_remote_tool(name: str, arguments: dict[str, Any]) -> Any:
         cached = get_cached(cache_key)
         if cached is not None:
             return cached
-    result = anyio.run(_call_remote_tool, REMOTE_MCP_URL, token, name, arguments)
+    # FastMCP calls sync tools on its running event loop, where anyio.run() raises; use a private loop in a thread.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(anyio.run, _call_remote_tool, REMOTE_MCP_URL, token, name, arguments).result()
     if not getattr(result, "isError", False):
         set_cached(cache_key, result)
     return result
@@ -600,27 +603,35 @@ def run_http_server() -> None:
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), access_log=False)
 
 
-CACHE_TTL = 60.0  # seconds
-_cache: dict[str, tuple[float, Any]] = {}
+CACHE_TTL = 60.0  # seconds; task lists/details change often
+CACHE_TTL_METADATA = 600.0  # projects/states/members/labels rarely change; fewer API calls on slow machines
+_cache: dict[str, tuple[float, Any]] = {}  # key -> (expiry on the monotonic clock, value)
 
 
 def get_cached(key: str) -> Any | None:
     cache_key = f"{_token_scope()}:{key}"
     cached = _cache.get(cache_key)
     if cached is not None:
-        timestamp, value = cached
-        if time.monotonic() - timestamp < CACHE_TTL:
+        expiry, value = cached
+        if time.monotonic() < expiry:
             return value
         _cache.pop(cache_key, None)
     return None
 
 
-def set_cached(key: str, value: Any) -> Any:
-    for expired_key, (timestamp, _) in list(_cache.items()):
-        if time.monotonic() - timestamp >= CACHE_TTL:
+def set_cached(key: str, value: Any, ttl: float = CACHE_TTL) -> Any:
+    now = time.monotonic()
+    for expired_key, (expiry, _) in list(_cache.items()):
+        if now >= expiry:
             _cache.pop(expired_key, None)
-    _cache[f"{_token_scope()}:{key}"] = (time.monotonic(), value)
+    _cache[f"{_token_scope()}:{key}"] = (now + ttl, value)
     return value
+
+
+def drop_cached(prefix: str) -> None:
+    scoped = f"{_token_scope()}:{prefix}"
+    for key in [key for key in _cache if key.startswith(scoped)]:
+        _cache.pop(key, None)
 
 
 def fetch_pages(path: str, mode: str = "cursor", page_size: str = PLANE_PAGE_SIZE, filters: dict[str, str] | None = None) -> list[dict[str, Any]]:
@@ -685,7 +696,7 @@ def fetch_projects(force_refresh: bool = False) -> list[dict[str, Any]]:
         cached = get_cached("projects")
         if cached is not None:
             return cached
-    return set_cached("projects", fetch_pages(f"workspaces/{WORKSPACE}/projects/"))
+    return set_cached("projects", fetch_pages(f"workspaces/{WORKSPACE}/projects/"), CACHE_TTL_METADATA)
 
 
 def fetch_states(project_id: str, force_refresh: bool = False) -> dict[str, dict[str, str]]:
@@ -696,7 +707,7 @@ def fetch_states(project_id: str, force_refresh: bool = False) -> dict[str, dict
             return cached
     states = fetch_pages(f"workspaces/{WORKSPACE}/projects/{project_id}/states/")
     result = {str(item["id"]): {"name": item.get("name", "Unknown"), "group": item.get("group", "unknown")} for item in states}
-    return set_cached(cache_key, result)
+    return set_cached(cache_key, result, CACHE_TTL_METADATA)
 
 def fetch_members(force_refresh: bool = False) -> list[dict[str, Any]]:
     if not force_refresh:
@@ -704,7 +715,7 @@ def fetch_members(force_refresh: bool = False) -> list[dict[str, Any]]:
         if cached is not None:
             return cached
     result = fetch_pages(f"workspaces/{WORKSPACE}/members/")
-    return set_cached("members", result)
+    return set_cached("members", result, CACHE_TTL_METADATA)
 
 
 def fetch_labels(project_id: str, force_refresh: bool = False) -> dict[str, str]:
@@ -715,7 +726,7 @@ def fetch_labels(project_id: str, force_refresh: bool = False) -> dict[str, str]
             return cached
     labels = fetch_pages(f"workspaces/{WORKSPACE}/projects/{project_id}/labels/")
     result = {str(item["id"]): item.get("name", "Unknown") for item in labels}
-    return set_cached(cache_key, result)
+    return set_cached(cache_key, result, CACHE_TTL_METADATA)
 
 def html_to_markdown(content: str, render_image: Callable[[str], str] | None = None) -> str:
     renderer = MarkdownRenderer(render_image)
@@ -1145,6 +1156,147 @@ def get_plane_task(task_identifier: str, force_refresh: bool = False) -> list[An
         and mimetypes.guess_type(path.name)[0] in {"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}
     ]
     return [header + rendered + comments_block + attachments_block, *images]
+
+
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+IMAGE_SIGNATURES = {"image/png": (b"\x89PNG\r\n\x1a\n",), "image/jpeg": (b"\xff\xd8\xff",), "image/gif": (b"GIF87a", b"GIF89a"), "image/webp": (b"RIFF",), "image/bmp": (b"BM",)}
+PRIORITIES = {"urgent", "high", "medium", "low", "none"}
+
+
+def api_send(method: str, path: str, payload: dict[str, Any]) -> Any:
+    """Write to Plane. Never retried: a repeated POST could create a duplicate task."""
+    request = urllib.request.Request(
+        f"{API}/{path.lstrip('/')}", data=json.dumps(payload).encode(), method=method,
+        headers={"X-API-Key": get_api_token(), "Accept": "application/json", "Content-Type": "application/json", "User-Agent": "plane-mcp/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        hint = " (the API token needs write permission)" if error.code == 403 else ""
+        raise RuntimeError(f"Plane API HTTP {error.code}{hint}: {error.read().decode('utf-8', 'replace')[:300]}") from error
+    return json.loads(body) if body.strip() else {}
+
+
+def load_image(raw_path: str) -> tuple[Path, str]:
+    """Accept only real, non-empty image files; the check follows symlinks to the true file."""
+    path = Path(raw_path).expanduser().resolve()
+    mime = IMAGE_TYPES.get(path.suffix.lower())
+    if not mime or not path.is_file():
+        raise ValueError(f"Not an image file (png, jpg, gif, webp or bmp): {raw_path}")
+    size = path.stat().st_size
+    if size == 0 or size > MAX_IMAGE_BYTES:
+        raise ValueError(f"Image must be between 1 byte and {MAX_IMAGE_BYTES // (1024 * 1024)} MiB: {raw_path}")
+    with path.open("rb") as handle:
+        head = handle.read(12)
+    if not head.startswith(IMAGE_SIGNATURES[mime]) or (mime == "image/webp" and head[8:12] != b"WEBP"):
+        raise ValueError(f"The file content is not a real {mime}: {raw_path}")
+    return path, mime
+
+
+def multipart_body(fields: dict[str, str], filename: str, content_type: str, data: bytes) -> tuple[bytes, str]:
+    boundary = os.urandom(12).hex()
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode() for name, value in fields.items()]
+    safe_name = filename.replace('"', "").replace("\r", "").replace("\n", "")
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{safe_name}"\r\nContent-Type: {content_type}\r\n\r\n'.encode())
+    return b"".join(parts) + data + f"\r\n--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
+
+
+def post_to_storage(upload_data: Any, path: Path, mime: str) -> None:
+    url = str(upload_data.get("url", "")) if isinstance(upload_data, dict) else ""
+    fields = upload_data.get("fields") if isinstance(upload_data, dict) else None
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not isinstance(fields, dict):
+        raise ValueError("Plane returned an unusable upload target")
+    body, content_type = multipart_body({str(key): str(value) for key, value in fields.items()}, path.name, mime, path.read_bytes())
+    # The Plane API key is deliberately not sent to the storage host.
+    request = Request(url, data=body, method="POST", headers={"Content-Type": content_type, "User-Agent": "plane-mcp/1.0"})
+    with urllib.request.urlopen(request, timeout=60):
+        pass
+
+
+def upload_image(project_id: str, item_id: str, path: Path, mime: str) -> None:
+    base = f"workspaces/{WORKSPACE}/projects/{project_id}/work-items/{item_id}/attachments/"
+    created = api_send("POST", base, {"name": path.name, "type": mime, "size": path.stat().st_size})
+    asset_id = str(created.get("asset_id") or (created.get("attachment") or {}).get("id") or "") if isinstance(created, dict) else ""
+    if not asset_id:
+        raise ValueError("Plane did not return an attachment id")
+    post_to_storage(created.get("upload_data"), path, mime)
+    api_send("PATCH", f"{base}{urllib.parse.quote(asset_id, safe='')}/", {})
+
+
+def attach_all(project_id: str, item_id: str, images: list[tuple[Path, str]]) -> tuple[int, list[str]]:
+    """Upload each image; report failures instead of raising, because the task already exists."""
+    failed = []
+    for path, mime in images:
+        try:
+            upload_image(project_id, item_id, path, mime)
+        except Exception as error:  # one bad image must not hide the others or the created task
+            failed.append(f"{path.name}: {error}")
+    drop_cached(f"attachments_{project_id}_{item_id}")
+    return len(images) - len(failed), failed
+
+
+def attach_summary(attached: int, total: int, failed: list[str]) -> str:
+    if not total:
+        return ""
+    summary = f"\nImages attached: {attached}/{total}"
+    return summary + ("\nNot attached:\n" + "\n".join(f"- {line}" for line in failed) if failed else "")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+def create_plane_task(
+    name: str,
+    description: str = "",
+    project: str = "",
+    priority: str = "none",
+    image_paths: list[str] | None = None,
+    assignee: str = "",
+) -> str:
+    """Create a task in ONE configured project and optionally attach local image files to it.
+
+    `project` is a configured project key/identifier (blank uses the default project). `image_paths` are files on
+    THIS computer (png, jpg, gif, webp, bmp); they are checked before anything is created. `assignee` is one
+    workspace member's name, email or id (blank leaves the task unassigned). The creator is the owner of the API
+    token. Requires an API token with write access. Do not call it again after a timeout: the task may already exist.
+    """
+    title = name.strip()
+    if not title or len(title) > 255:
+        raise ValueError("name is required and must be at most 255 characters")
+    if priority.strip().lower() not in PRIORITIES:
+        raise ValueError(f"priority must be one of: {', '.join(sorted(PRIORITIES))}")
+    targets = configured_projects(project)
+    if len(targets) != 1:
+        raise ValueError("Create a task in exactly one project; name it by key or identifier")
+    images = [load_image(path) for path in image_paths or []]  # validate everything before the first write
+    assignee_ids: list[str] = []
+    if assignee.strip():
+        matches = None if assignee.strip().lower() == "all" else assignee_filter_ids(fetch_members(), assignee.strip())
+        if not matches or len(matches) != 1:
+            raise ValueError(f"assignee must match exactly one workspace member (name, email or id): {assignee}")
+        assignee_ids = list(matches)
+    description_html = "".join(f"<p>{html.escape(line)}</p>" for line in description.splitlines() if line.strip())
+    project_id = targets[0]["id"]
+    item = api_send("POST", f"workspaces/{WORKSPACE}/projects/{project_id}/work-items/", {
+        "name": title, "description_html": description_html, "priority": priority.strip().lower(),
+        **({"assignees": assignee_ids} if assignee_ids else {}),
+    })
+    if not isinstance(item, dict) or not item.get("id") or item.get("sequence_id") is None:
+        raise RuntimeError("Plane did not confirm the new task; check Plane before trying again")
+    drop_cached(f"items_{project_id}_")  # task lists must show the new task at once
+    attached, failed = attach_all(project_id, str(item["id"]), images)
+    return f"Created {targets[0]['identifier']}-{item['sequence_id']}: {title}" + attach_summary(attached, len(images), failed)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+def attach_images_to_plane_task(task_identifier: str, image_paths: list[str]) -> str:
+    """Attach local image files (png, jpg, gif, webp, bmp on THIS computer) to an existing task by its full code."""
+    if not image_paths:
+        raise ValueError("image_paths must list at least one image file")
+    images = [load_image(path) for path in image_paths]
+    item, _states = find_item(task_identifier, force_refresh=True)
+    attached, failed = attach_all(str(item["project"]), str(item["id"]), images)
+    return f"{task_identifier.strip().upper()}" + attach_summary(attached, len(images), failed)
 
 
 def render_html_cli() -> int:

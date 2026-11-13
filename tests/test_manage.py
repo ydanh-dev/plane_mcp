@@ -157,5 +157,94 @@ class SetupTests(unittest.TestCase):
                 self.assertNotIn("remote_mcp_url", json.loads(config_path.read_text()))
 
 
+class SetupCloudChoiceTests(unittest.TestCase):
+    PROJECT_ID = "e82f2243-a973-4dfd-b2f0-005b44f4fbf5"
+
+    def run_setup(self, cloud_answer: str) -> dict:
+        project = {"id": self.PROJECT_ID, "identifier": "NTSS", "name": "NTSS v2"}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            store = SimpleNamespace(get_keyring=lambda: SimpleNamespace(priority=1), set_password=lambda *_args: None)
+            with patch.object(manage, "CONFIG_PATH", config_path), \
+                 patch.object(manage, "load_config", return_value={}), \
+                 patch.object(manage, "fetch_current_user", return_value={"id": "11111111-1111-4111-8111-111111111111", "display": "Dev", "assignee": "dev@example.com"}), \
+                 patch.object(manage, "fetch_project_metadata", return_value=project), \
+                 patch.object(manage, "input", create=True, side_effect=[self.PROJECT_ID, "n", cloud_answer]), \
+                 patch.object(manage.getpass, "getpass", return_value="secret-token"), \
+                 patch.dict(sys.modules, {"keyring": store}), redirect_stdout(StringIO()):
+                manage.setup()
+            return json.loads(config_path.read_text())
+
+    def test_enter_accepts_the_company_cloud_backend(self):
+        self.assertEqual(self.run_setup("")["remote_mcp_url"], manage.DEFAULT_REMOTE_URL)
+
+    def test_no_keeps_everything_local(self):
+        self.assertNotIn("remote_mcp_url", self.run_setup("n"))
+
+
+class SetupMistakeTests(unittest.TestCase):
+    PROJECT_ID = "996bba75-2852-4c76-ba34-e7e01119e349"
+
+    def test_pasting_the_whole_project_link_is_accepted(self):
+        link = f"https://plane.example.com/ws/projects/{self.PROJECT_ID}/issues/"
+        self.assertEqual(manage.UUID_PATTERN.search(link).group(0), self.PROJECT_ID)
+        self.assertIsNone(manage.UUID_PATTERN.search("https://plane.example.com/ws/projects/"))
+
+    def http_error(self, code):
+        return manage.urllib.error.HTTPError("https://plane.example.com", code, "x", {}, None)
+
+    def test_project_errors_say_what_is_wrong(self):
+        for code, words in ((401, "rejected the API token"), (403, "cannot access"), (404, "no project with that UUID")):
+            with patch.object(manage.urllib.request, "urlopen", side_effect=self.http_error(code)):
+                with self.assertRaisesRegex(ValueError, words):
+                    manage.fetch_project_metadata("token", self.PROJECT_ID)
+
+    def test_a_rejected_token_points_to_where_to_create_one(self):
+        with patch.object(manage.urllib.request, "urlopen", side_effect=self.http_error(401)):
+            with self.assertRaisesRegex(ValueError, "API tokens"):
+                manage.fetch_current_user("bad")
+
+
+class DoctorTests(unittest.TestCase):
+    CONFIG = {"projects": {"demo": {"id": "00000000-0000-0000-0000-000000000001", "identifier": "DEMO"}}}
+
+    def run_doctor(self, config, token="secret-token", **patches):
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps(config))
+            with patch.object(manage, "CONFIG_PATH", config_path), \
+                 patch.object(manage, "read_token", return_value=token), \
+                 patch.object(manage, "fetch_current_user", **patches.get("user", {"return_value": {"display": "Ann"}})), \
+                 patch.object(manage, "fetch_project_metadata", return_value={"name": "Demo"}), \
+                 redirect_stdout(out):
+                code = manage.doctor()
+        return code, out.getvalue()
+
+    def test_reports_ok_without_leaking_the_token(self):
+        code, output = self.run_doctor(self.CONFIG)
+        self.assertEqual(code, 0)
+        self.assertIn("OK    plane api: Ann", output)
+        self.assertIn("mode: local", output)
+        self.assertNotIn("secret-token", output)
+
+    def test_missing_token_fails_before_any_network_call(self):
+        code, output = self.run_doctor(self.CONFIG, token="")
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL  token", output)
+        self.assertNotIn("plane api", output)
+
+    def test_api_failure_is_reported_and_exit_code_is_nonzero(self):
+        code, output = self.run_doctor(self.CONFIG, user={"side_effect": ValueError("bad token")})
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL  plane api: bad token", output)
+        self.assertIn("OK    project DEMO", output)  # later checks still run
+
+    def test_no_config_points_to_setup(self):
+        code, output = self.run_doctor({})
+        self.assertEqual(code, 1)
+        self.assertIn("plane-mcp setup", output)
+
+
 if __name__ == "__main__":
     unittest.main()

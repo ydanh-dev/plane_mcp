@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,6 +20,7 @@ import zipfile
 import zlib
 from pathlib import Path
 from pathlib import PurePosixPath
+from typing import Callable
 from uuid import UUID
 
 GITHUB_VERSION_URL = "https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/VERSION"
@@ -27,6 +29,8 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = Path.home() / ".config/plane-mcp/config.json"
 PLANE_BASE_URL = "https://plane.apetechs.co/api/v1"
 PLANE_WORKSPACE_SLUG = "apetechs"
+UUID_PATTERN = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+DEFAULT_REMOTE_URL ="https://plane-mcp.apetechs.workers.dev/mcp"  # the company Cloudflare Worker
 
 
 def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -60,8 +64,15 @@ def fetch_project_metadata(token: str, project_id: str) -> dict[str, str]:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             project = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise ValueError("Could not read this project; check the UUID, API token, and network access") from error
+    except urllib.error.HTTPError as error:
+        reason = {
+            401: "Plane rejected the API token",
+            403: "this API token cannot access that project",
+            404: "no project with that UUID exists in this workspace",
+        }.get(error.code, f"Plane returned HTTP {error.code}")
+        raise ValueError(f"Could not read this project: {reason}") from error
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise ValueError("Could not read this project; check the network connection") from error
     if not isinstance(project, dict):
         raise ValueError("Plane returned invalid project details for this UUID")
     identifier = str(project.get("identifier") or "").upper()
@@ -79,8 +90,14 @@ def fetch_current_user(token: str) -> dict[str, str]:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             user = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise ValueError("Could not identify this Plane API token; check the token and network access") from error
+    except urllib.error.HTTPError as error:
+        if error.code in {401, 403}:
+            raise ValueError(
+                "Plane rejected this API token. Create one in Plane (Workspace Settings > API tokens), copy it whole, and run setup again"
+            ) from error
+        raise ValueError(f"Plane returned HTTP {error.code} when checking the API token") from error
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise ValueError("Could not reach Plane to check the API token; check the network connection") from error
     if not isinstance(user, dict):
         raise ValueError("Plane returned invalid user details for this API token")
     try:
@@ -94,6 +111,8 @@ def fetch_current_user(token: str) -> dict[str, str]:
 def setup() -> None:
     previous = load_config()
     print("Plane MCP setup — user-local config; token is stored in the operating system credential store.\n")
+    print("Step 1: in Plane (web), open Workspace Settings > API tokens, create a token and copy it.")
+    print("        Paste it below; nothing is shown while you paste.\n")
 
     token = getpass.getpass("Plane API token (input hidden): ").strip()
     if not token:
@@ -108,7 +127,8 @@ def setup() -> None:
     old_projects = previous.get("projects", {})
     if isinstance(old_projects, dict):
         projects.update(old_projects)
-    print("\nAdd projects by UUID. Plane supplies each project's name and task-code prefix.")
+    print("\nStep 2: add projects. Open a project in Plane and copy its UUID from the web address")
+    print("        (.../projects/<UUID>/...); pasting the whole link works too. Plane supplies the name and task-code prefix.")
     if projects:
         print(f"Keeping {len(projects)} existing project(s).")
     while True:
@@ -119,11 +139,11 @@ def setup() -> None:
                 break
             print("Add at least one project UUID.")
             continue
-        try:
-            project_id = str(UUID(project_id))
-        except ValueError:
-            print("Enter the full project UUID from the Plane URL.")
+        match = UUID_PATTERN.search(project_id)
+        if not match:
+            print("No project UUID found there. Open the project in Plane and copy it from the web address (.../projects/<UUID>/...); pasting the whole link works too.")
             continue
+        project_id = str(UUID(match.group(0)))
         try:
             project = fetch_project_metadata(token, project_id)
         except ValueError as error:
@@ -157,14 +177,21 @@ def setup() -> None:
         "credential_account": account,
         "default_project": default_project, "projects": projects,
     }
-    if previous.get("remote_mcp_url"):
-        config["remote_mcp_url"] = previous["remote_mcp_url"]
+    remote_url = str(previous.get("remote_mcp_url") or "")
+    if not remote_url:
+        answer = input("Run the heavy work on the company cloud backend (lighter on slow PCs)? [Y/n]: ")
+        if answer.strip().lower() not in {"n", "no"}:
+            remote_url = DEFAULT_REMOTE_URL
+    if remote_url:
+        config["remote_mcp_url"] = remote_url
     save_config(config)
     print(f"\nSetup complete. Saved config: {CONFIG_PATH}\nPlane token saved to the OS credential store (service: plane-mcp).")
     print("\nRegister one MCP server in Codex CLI/Desktop:")
     print(f'  codex mcp add plane -- "{python_executable()}" "{ROOT / "plane_mcp.py"}"')
     print("\nFor Antigravity, add the same command and args as one global MCP server in MCP Config.")
     print("Restart the clients after registration.")
+    print("\nVerify the token, projects and speed with: plane-mcp doctor")
+    print("Slow machine? Offload the work to a cloud backend: plane-mcp remote https://YOUR-SERVICE/mcp")
 
 
 def latest_tag() -> str:
@@ -315,10 +342,73 @@ def set_remote_url(value: str) -> None:
     print("Remote Plane MCP URL saved. The Plane token remains in the OS credential store.")
 
 
+def read_token(config: dict[str, object]) -> str:
+    if os.environ.get("PLANE_API_TOKEN"):
+        return os.environ["PLANE_API_TOKEN"]
+    import keyring
+    return keyring.get_password("plane-mcp", str(config.get("credential_account", "plane-mcp"))) or ""
+
+
+def doctor() -> int:
+    """Check config, token, Plane API and the optional remote backend. Never prints the token."""
+    config = load_config()
+    projects = config.get("projects")
+    if not isinstance(projects, dict) or not projects:
+        print(f"FAIL  config: no projects in {CONFIG_PATH}; run `plane-mcp setup`")
+        return 1
+    print(f"OK    config: {CONFIG_PATH} ({len(projects)} project(s))")
+    try:
+        token = read_token(config)
+    except Exception as error:  # keyring backends raise many different errors
+        token, reason = "", f"cannot read the OS credential store ({error})"
+    else:
+        reason = "no token stored; run `plane-mcp setup`"
+    if not token:
+        print(f"FAIL  token: {reason}")
+        return 1
+    print("OK    token: found (value not shown)")
+
+    failures = 0
+
+    def check(label: str, action: Callable[[], str]) -> None:
+        nonlocal failures
+        start = time.monotonic()
+        try:
+            detail = action()
+        except Exception as error:  # report every problem in one run
+            failures += 1
+            print(f"FAIL  {label}: {error}")
+            return
+        print(f"OK    {label}: {detail} ({(time.monotonic() - start) * 1000:.0f} ms)")
+
+    check("plane api", lambda: fetch_current_user(token)["display"])
+    for project in projects.values():
+        project_id = str(project.get("id", ""))
+        check(f"project {project.get('identifier', '?')}", lambda project_id=project_id: fetch_project_metadata(token, project_id)["name"])
+
+    remote = str(config.get("remote_mcp_url") or "")
+    if remote:
+        parsed = urllib.parse.urlparse(remote)
+
+        def remote_health() -> str:
+            with urllib.request.urlopen(f"{parsed.scheme}://{parsed.netloc}/healthz", timeout=20) as response:
+                if response.read(16).strip() != b"ok":
+                    raise ValueError("unexpected /healthz response")
+            return remote
+
+        check("remote backend", remote_health)
+        print("INFO  mode: remote — heavy work runs on the cloud backend, not on this machine")
+    else:
+        print("INFO  mode: local — all work runs on this machine; `plane-mcp remote <https-url>/mcp` offloads it")
+    return 1 if failures else 0
+
+
 def main() -> None:
     if len(sys.argv) < 2 or sys.argv[1] in {"-h", "--help"}:
-        print("Usage: plane-mcp {setup|update|status|remote <https-url|off>}")
+        print("Usage: plane-mcp {setup|update|status|doctor|remote <https-url|off>}")
         return
+    if sys.argv[1] == "doctor":
+        raise SystemExit(doctor())
     if sys.argv[1] == "setup":
         setup()
     elif sys.argv[1] == "update":
