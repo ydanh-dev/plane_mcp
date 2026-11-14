@@ -37,9 +37,10 @@ try {
 
     $env:UV_INSTALL_DIR = Join-Path $dest ".tools"
     $env:UV_NO_MODIFY_PATH = "1"
-    $uvInstaller = Join-Path $work "uv-install.ps1"
-    Invoke-WebRequest "https://astral.sh/uv/install.ps1" -OutFile $uvInstaller
-    & $uvInstaller
+    # uv's own one-liner in a separate powershell: no .ps1 file is run (the default Windows policy blocks
+    # those) and the installer's `exit 1` on failure cannot close this window. The UV_* variables above are inherited.
+    & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+    if ($LASTEXITCODE -ne 0) { throw "Could not install the local Python package manager." }
 
     $uv = Join-Path $dest ".tools\uv.exe"
     if (-not (Test-Path $uv)) { throw "Could not install the local Python package manager." }
