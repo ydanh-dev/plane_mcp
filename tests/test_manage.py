@@ -157,29 +157,30 @@ class SetupTests(unittest.TestCase):
                 self.assertNotIn("remote_mcp_url", json.loads(config_path.read_text()))
 
 
-class SetupCloudChoiceTests(unittest.TestCase):
+class SetupStaysLocalTests(unittest.TestCase):
     PROJECT_ID = "e82f2243-a973-4dfd-b2f0-005b44f4fbf5"
 
-    def run_setup(self, cloud_answer: str) -> dict:
+    def run_setup(self, previous: dict) -> dict:
         project = {"id": self.PROJECT_ID, "identifier": "NTSS", "name": "NTSS v2"}
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
             store = SimpleNamespace(get_keyring=lambda: SimpleNamespace(priority=1), set_password=lambda *_args: None)
             with patch.object(manage, "CONFIG_PATH", config_path), \
-                 patch.object(manage, "load_config", return_value={}), \
+                 patch.object(manage, "load_config", return_value=previous), \
                  patch.object(manage, "fetch_current_user", return_value={"id": "11111111-1111-4111-8111-111111111111", "display": "Dev", "assignee": "dev@example.com"}), \
                  patch.object(manage, "fetch_project_metadata", return_value=project), \
-                 patch.object(manage, "input", create=True, side_effect=[self.PROJECT_ID, "n", cloud_answer]), \
+                 patch.object(manage, "input", create=True, side_effect=[self.PROJECT_ID, "n"]), \
                  patch.object(manage.getpass, "getpass", return_value="secret-token"), \
                  patch.dict(sys.modules, {"keyring": store}), redirect_stdout(StringIO()):
-                manage.setup()
+                manage.setup()  # a third question would exhaust the two answers above and fail the test
             return json.loads(config_path.read_text())
 
-    def test_enter_accepts_the_company_cloud_backend(self):
-        self.assertEqual(self.run_setup("")["remote_mcp_url"], manage.DEFAULT_REMOTE_URL)
+    def test_setup_asks_only_for_token_and_projects_and_stays_local(self):
+        self.assertNotIn("remote_mcp_url", self.run_setup({}))
 
-    def test_no_keeps_everything_local(self):
-        self.assertNotIn("remote_mcp_url", self.run_setup("n"))
+    def test_a_remote_url_someone_set_on_purpose_is_kept(self):
+        previous = {"remote_mcp_url": "https://mcp.example.com/mcp"}
+        self.assertEqual(self.run_setup(previous)["remote_mcp_url"], "https://mcp.example.com/mcp")
 
 
 class SetupMistakeTests(unittest.TestCase):

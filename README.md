@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 The one-line form executes the downloaded installer directly. Inspect it first if you prefer to review installation scripts before execution.
 
-For manual source review, download [Plane MCP v0.3.0 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.3.0.zip).
+For manual source review, download [Plane MCP v0.3.1 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.3.1.zip).
 
 On Windows, the installer also installs a private Python runtime and dependencies; Python and Git do not need to be installed first. To inspect the script before running it:
 
@@ -151,7 +151,7 @@ Rules: the Plane API token must have **write** access (the read-only token from 
 
 The installer is safe to run again: if an earlier install failed or was interrupted, running the same command continues with whatever is missing (source, `uv`, Python, dependencies, setup) instead of starting over, and an older install it did not create is moved aside to `plane-mcp.backup-<time>`, never deleted.
 
-Local mode runs the Plane MCP process on the user's machine: it fetches the task list, parses HTML and writes images to disk. The model itself never runs locally, so no GPU is used. Measured on one Mac, listing tasks used about 0.05 s of CPU and 65 MB of RAM, so the wait is mostly network time to Plane. `plane-mcp setup` asks whether to use the company Cloudflare Worker; with it, the Plane fetching and HTML work run in the cloud and the local process is a thin bridge, at the cost of one extra network hop (a few hundred ms to a few seconds slower in the same test). Switch any time:
+Local mode runs the Plane MCP process on the user's machine: it fetches the task list, parses HTML and writes images to disk. The model itself never runs locally, so no GPU is used. Measured on one Mac, listing tasks used about 0.05 s of CPU and 65 MB of RAM, so the wait is mostly network time to Plane. `plane-mcp setup` does not ask about the cloud: it always runs locally. A Cloud Run or Cloudflare Worker backend (see below) is an optional, advanced setup that adds one extra network hop (a few hundred ms to a few seconds slower in the same test); only if someone configured one, switch with:
 
 ```sh
 plane-mcp remote https://YOUR-SERVICE/mcp   # heavy work moves to the cloud
@@ -259,7 +259,7 @@ curl -fsSL https://raw.githubusercontent.com/ydanh-dev/plane_mcp/main/install.sh
 
 Dạng một dòng thực thi trực tiếp installer vừa tải về. Nếu muốn xem script trước, hãy dùng cách tải file rồi đọc ở trên.
 
-Nếu muốn xem source thủ công, tải [Plane MCP v0.3.0 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.3.0.zip).
+Nếu muốn xem source thủ công, tải [Plane MCP v0.3.1 (.zip)](https://github.com/ydanh-dev/plane_mcp/archive/refs/tags/v0.3.1.zip).
 
 Trên Windows, installer cũng tự cài Python riêng và dependencies; không cần cài Python hay Git trước. Để xem script trước khi chạy:
 
@@ -368,7 +368,7 @@ Quy tắc: API token của Plane phải có quyền **ghi** (token chỉ đọc 
 
 Installer chạy lại an toàn: nếu lần cài trước bị lỗi hoặc bị ngắt, chạy lại đúng lệnh đó sẽ làm tiếp phần còn thiếu (mã nguồn, `uv`, Python, thư viện, setup) thay vì làm lại từ đầu. Bản cài cũ không do installer tạo sẽ được chuyển sang `plane-mcp.backup-<giờ>`, không bị xóa.
 
-Chế độ local chạy tiến trình Plane MCP trên máy người dùng: tải danh sách task, phân tích HTML và ghi ảnh ra đĩa. Model không chạy trên máy nên không dùng GPU. Đo trên một máy Mac, liệt kê task chỉ tốn khoảng 0,05 giây CPU và 65 MB RAM, nên thời gian chờ chủ yếu là mạng tới Plane. `plane-mcp setup` sẽ hỏi có dùng Cloudflare Worker của công ty không; khi dùng, phần tải dữ liệu Plane và xử lý HTML chạy trên cloud, tiến trình local chỉ là cầu nối mỏng, đổi lại thêm một chặng mạng (chậm hơn vài trăm mili giây đến vài giây trong cùng bài đo). Đổi qua lại bất cứ lúc nào:
+Chế độ local chạy tiến trình Plane MCP trên máy người dùng: tải danh sách task, phân tích HTML và ghi ảnh ra đĩa. Model không chạy trên máy nên không dùng GPU. Đo trên một máy Mac, liệt kê task chỉ tốn khoảng 0,05 giây CPU và 65 MB RAM, nên thời gian chờ chủ yếu là mạng tới Plane. `plane-mcp setup` không hỏi về cloud: luôn chạy local. Backend Cloud Run hoặc Cloudflare Worker (xem bên dưới) chỉ là tùy chọn nâng cao, thêm một chặng mạng (chậm hơn vài trăm mili giây đến vài giây trong cùng bài đo); chỉ khi ai đó đã cấu hình thì mới đổi qua lại bằng:
 
 ```sh
 plane-mcp remote https://YOUR-SERVICE/mcp   # việc nặng chạy trên cloud

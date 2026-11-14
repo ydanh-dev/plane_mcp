@@ -30,7 +30,6 @@ CONFIG_PATH = Path.home() / ".config/plane-mcp/config.json"
 PLANE_BASE_URL = "https://plane.apetechs.co/api/v1"
 PLANE_WORKSPACE_SLUG = "apetechs"
 UUID_PATTERN = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-DEFAULT_REMOTE_URL ="https://plane-mcp.apetechs.workers.dev/mcp"  # the company Cloudflare Worker
 
 
 def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -177,13 +176,8 @@ def setup() -> None:
         "credential_account": account,
         "default_project": default_project, "projects": projects,
     }
-    remote_url = str(previous.get("remote_mcp_url") or "")
-    if not remote_url:
-        answer = input("Run the heavy work on the company cloud backend (lighter on slow PCs)? [Y/n]: ")
-        if answer.strip().lower() not in {"n", "no"}:
-            remote_url = DEFAULT_REMOTE_URL
-    if remote_url:
-        config["remote_mcp_url"] = remote_url
+    if previous.get("remote_mcp_url"):  # only kept if someone set it on purpose; setup itself always stays local
+        config["remote_mcp_url"] = previous["remote_mcp_url"]
     save_config(config)
     print(f"\nSetup complete. Saved config: {CONFIG_PATH}\nPlane token saved to the OS credential store (service: plane-mcp).")
     print("\nRegister one MCP server in Codex CLI/Desktop:")
@@ -191,7 +185,6 @@ def setup() -> None:
     print("\nFor Antigravity, add the same command and args as one global MCP server in MCP Config.")
     print("Restart the clients after registration.")
     print("\nVerify the token, projects and speed with: plane-mcp doctor")
-    print("Slow machine? Offload the work to a cloud backend: plane-mcp remote https://YOUR-SERVICE/mcp")
 
 
 def latest_tag() -> str:
@@ -399,7 +392,7 @@ def doctor() -> int:
         check("remote backend", remote_health)
         print("INFO  mode: remote — heavy work runs on the cloud backend, not on this machine")
     else:
-        print("INFO  mode: local — all work runs on this machine; `plane-mcp remote <https-url>/mcp` offloads it")
+        print("INFO  mode: local — everything runs on this machine")
     return 1 if failures else 0
 
 
